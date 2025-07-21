@@ -2,11 +2,11 @@ import os
 import asyncio
 import time
 import logging
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends,status
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -14,6 +14,21 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from playwright.async_api import async_playwright
 import io
+
+from routes.auth import router as auth_router
+from routes.users import router as users_router
+from routes.billing import router as billing_router
+from routes.advanced_generation import router as advanced_router
+
+from auth.dependencies import get_current_user, check_usage_limits
+from auth.middleware import get_auth_middleware
+from models.generation import GenerationCreate
+
+from services.user_service import UserService
+from services.generation_service import GenerationService
+from auth.middleware import get_auth_middleware
+from services.premium_service import PremiumService
+from services.export_service import ExportService
 
 # Load environment variables
 load_dotenv()
@@ -45,9 +60,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include routers
+app.include_router(auth_router)
+app.include_router(users_router)
+app.include_router(billing_router)
+app.include_router(advanced_router)
+
+
 # Configuration constants
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")  # Default to 1.5-flash
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")  # Default to 2.5-flash
 GENERATION_TIMEOUT = int(os.getenv("GENERATION_TIMEOUT", "120"))  # 2 minutes default
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "10"))  # requests per minute
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # seconds
@@ -314,38 +336,110 @@ async def health_check():
 async def generate_image(
     request: GenerationRequest,
     http_request: Request,
-    _: None = Depends(check_rate_limit)
+    current_user: dict = Depends(get_current_user),
+    _: dict = Depends(check_usage_limits),
+    __: None = Depends(check_rate_limit),
+    format: str = "png",
+    quality: int = 95
 ):
     """
-    Generate a visual asset based on the user's prompt.
-    
-    This endpoint is structured to easily accommodate future authentication
-    by adding a dependency injection parameter like:
-    current_user: User = Depends(get_current_user)
+    Generate a visual asset with premium features support
     """
     client_ip = http_request.client.host
-    request_id = f"{client_ip}_{int(time.time())}"
+    request_id = f"{current_user['id']}_{int(time.time())}"
     
-    logger.info(f"[{request_id}] Generation request received")
-    logger.debug(f"[{request_id}] Request details: {request.dict()}")
+    logger.info(f"[{request_id}] Generation request from user: {current_user['email']}")
+    
+    start_time = time.time()
     
     try:
+        # Initialize services
+        auth_middleware = get_auth_middleware()
+        user_service = UserService(auth_middleware.supabase)
+        generation_service = GenerationService(auth_middleware.supabase)
+        premium_service = PremiumService(auth_middleware.supabase)
+        export_service = ExportService()
+        
+        # Get user tier
+        user_tier = current_user.get("subscription_tier", "free")
+        
+        # Check premium feature restrictions
+        if not premium_service.can_use_dimensions(user_tier, request.width, request.height):
+            tier_features = premium_service.get_tier_features(user_tier)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Dimensions {request.width}x{request.height} exceed your plan limit ({tier_features['max_width']}x{tier_features['max_height']})"
+            )
+        
+        if not premium_service.can_use_model(user_tier, request.model or GEMINI_MODEL):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Model {request.model} not available in your plan"
+            )
+        
+        if not premium_service.can_export_format(user_tier, format):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Export format {format} not available in your plan"
+            )
+        
+        # Check usage limits
+        usage_check = await user_service.check_usage_limits(current_user["id"])
+        if not usage_check["allowed"]:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=usage_check["reason"]
+            )
+        
+        # Get queue priority for premium users
+        priority = await premium_service.get_generation_queue_priority(current_user["id"])
+        
         # Get appropriate model for this request
         model = get_model_for_request(request)
         
         # Generate the visual asset
         image_bytes = await generate_visual_asset(request, model, client_ip)
         
-        logger.info(f"[{request_id}] Generation completed successfully")
+        # Convert to requested format if not PNG
+        if format.lower() != "png":
+            image_bytes = await export_service.convert_image(image_bytes, format, quality)
         
-        # Return the image as a streaming response
+        # Calculate generation time
+        generation_time = int((time.time() - start_time) * 1000)
+        
+        # Create generation record
+        generation_data = GenerationCreate(
+            user_id=current_user["id"],
+            prompt=request.prompt,
+            model_used=request.model or GEMINI_MODEL,
+            width=request.width,
+            height=request.height,
+            generation_time_ms=generation_time
+        )
+        
+        # Save to database
+        generation_record = await generation_service.create_generation(generation_data)
+        
+        # Update user usage count
+        await user_service.increment_usage(current_user["id"])
+        
+        logger.info(f"[{request_id}] Generation completed successfully with format: {format}")
+        
+        # Return the image with enhanced headers
+        content_type = export_service.get_content_type(format)
+        file_extension = export_service.get_file_extension(format)
+        
         return StreamingResponse(
             io.BytesIO(image_bytes),
-            media_type="image/png",
+            media_type=content_type,
             headers={
-                "Content-Disposition": "inline; filename=generated-image.png",
+                "Content-Disposition": f"inline; filename=generated-image{file_extension}",
                 "Cache-Control": "no-cache",
-                "X-Request-ID": request_id
+                "X-Request-ID": request_id,
+                "X-Generation-Time": str(generation_time),
+                "X-Generation-ID": generation_record["id"] if generation_record else "unknown",
+                "X-User-Tier": user_tier,
+                "X-Queue-Priority": str(priority)
             }
         )
         
@@ -358,20 +452,217 @@ async def generate_image(
             status_code=500,
             detail=f"Unexpected error during image generation: {str(e)}"
         )
-
+  
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
     return {
         "message": "LayoutCraft Backend API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "model": GEMINI_MODEL,
         "available_models": list(AVAILABLE_MODELS.keys()),
         "endpoints": {
             "generate": "/api/generate",
-            "health": "/health"
+            "health": "/health", 
+            "auth": "/auth",
+            "users": "/users",
+            "billing": "/billing",
+            "premium": "/premium",
+            "advanced": "/advanced"  # New advanced features
         }
     }
+
+@app.get("/users/analytics")
+async def get_user_analytics(current_user: dict = Depends(get_current_user)):
+    """
+    Get comprehensive user analytics
+    """
+    try:
+        auth_middleware = get_auth_middleware()
+        user_service = UserService(auth_middleware.supabase)
+        generation_service = GenerationService(auth_middleware.supabase)
+        
+        # Get user statistics
+        user_stats = await user_service.get_user_statistics(current_user["id"])
+        generation_stats = await generation_service.get_generation_statistics(current_user["id"])
+        
+        return {
+            "user_stats": user_stats,
+            "generation_stats": generation_stats,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting user analytics: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to get user analytics"
+        )
+
+# Add new premium features endpoints
+@app.post("/api/batch-generate")
+async def batch_generate(
+    requests: List[GenerationRequest],
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Batch generate multiple images (premium feature)
+    """
+    try:
+        auth_middleware = get_auth_middleware()
+        premium_service = PremiumService(auth_middleware.supabase)
+        
+        # Check if user can perform batch generation
+        batch_check = await premium_service.can_generate_batch(current_user["id"], len(requests))
+        if not batch_check["allowed"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=batch_check["reason"]
+            )
+        
+        # Process batch requests
+        results = []
+        for i, request in enumerate(requests):
+            try:
+                # Generate individual image
+                result = await generate_image(request, current_user)
+                results.append({"index": i, "status": "success", "result": result})
+            except Exception as e:
+                results.append({"index": i, "status": "error", "error": str(e)})
+        
+        return {"batch_results": results}
+        
+    except Exception as e:
+        logger.error(f"Batch generation error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Batch generation failed"
+        )
+
+@app.get("/premium/features")
+async def get_premium_features(current_user: dict = Depends(get_current_user)):
+    """
+    Get available premium features for current user
+    """
+    try:
+        auth_middleware = get_auth_middleware()
+        premium_service = PremiumService(auth_middleware.supabase)
+        
+        user_tier = current_user.get("subscription_tier", "free")
+        features = premium_service.get_tier_features(user_tier)
+        
+        return {
+            "tier": user_tier,
+            "features": features,
+            "limits": {
+                "max_dimensions": f"{features['max_width']}x{features['max_height']}",
+                "available_models": features["available_models"],
+                "export_formats": features["export_formats"],
+                "generation_history_days": features["generation_history_days"]
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting premium features: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to get premium features"
+        )
+
+
+@app.post("/premium/templates")
+async def create_custom_template(
+    template_data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create custom template (premium feature)"""
+    try:
+        auth_middleware = get_auth_middleware()
+        premium_service = PremiumService(auth_middleware.supabase)
+        
+        template_id = await premium_service.create_custom_template(current_user["id"], template_data)
+        
+        if not template_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Custom templates not available in your plan"
+            )
+        
+        return {"template_id": template_id, "message": "Template created successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating custom template: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create custom template"
+        )
+
+@app.get("/premium/templates")
+async def get_user_templates(current_user: dict = Depends(get_current_user)):
+    """Get user's custom templates"""
+    try:
+        auth_middleware = get_auth_middleware()
+        premium_service = PremiumService(auth_middleware.supabase)
+        
+        templates = await premium_service.get_user_templates(current_user["id"])
+        
+        return {"templates": templates}
+        
+    except Exception as e:
+        logger.error(f"Error getting user templates: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to get user templates"
+        )
+
+@app.post("/premium/brand-kit")
+async def create_brand_kit(
+    brand_data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create brand kit (premium feature)"""
+    try:
+        auth_middleware = get_auth_middleware()
+        premium_service = PremiumService(auth_middleware.supabase)
+        
+        brand_kit_id = await premium_service.create_brand_kit(current_user["id"], brand_data)
+        
+        if not brand_kit_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Brand kits not available in your plan"
+            )
+        
+        return {"brand_kit_id": brand_kit_id, "message": "Brand kit created successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating brand kit: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create brand kit"
+        )
+
+@app.get("/premium/brand-kit")
+async def get_brand_kit(current_user: dict = Depends(get_current_user)):
+    """Get user's brand kit"""
+    try:
+        auth_middleware = get_auth_middleware()
+        premium_service = PremiumService(auth_middleware.supabase)
+        
+        brand_kit = await premium_service.get_brand_kit(current_user["id"])
+        
+        return {"brand_kit": brand_kit}
+        
+    except Exception as e:
+        logger.error(f"Error getting brand kit: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to get brand kit"
+        )
 
 if __name__ == "__main__":
     import uvicorn
