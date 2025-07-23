@@ -11,3 +11,5 @@ passlib[bcrypt]
 email-validator
 pillow>=9.0.0
 cairosvg>=2.5.0
+stripe>=12.2.0
+slowapi

@@ -2,6 +2,8 @@ import os
 import asyncio
 import time
 import logging
+import random
+from prompts.design_prompts import DESIGN_PROMPTS
 from typing import Dict, List, Optional
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -74,6 +76,10 @@ GENERATION_TIMEOUT = int(os.getenv("GENERATION_TIMEOUT", "120"))  # 2 minutes de
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "10"))  # requests per minute
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # seconds
 
+# MVP Rate limiting configuration
+MVP_RATE_LIMIT_REQUESTS = int(os.getenv("MVP_RATE_LIMIT_REQUESTS", "5"))  # 5 requests per minute for MVP
+MVP_RATE_LIMIT_WINDOW = int(os.getenv("MVP_RATE_LIMIT_WINDOW", "60"))  # seconds
+
 # Available models for easy switching
 AVAILABLE_MODELS = {
     "gemini-1.5-flash": "gemini-1.5-flash",
@@ -83,8 +89,13 @@ AVAILABLE_MODELS = {
     "gemini-2.5-pro": "gemini-2.5-pro"      # Add when available
 }
 
+# Prompt selection configuration
+PROMPT_SELECTION_MODE = os.getenv("PROMPT_SELECTION_MODE", "random")  # "random" or "sequential"
+prompt_index_counter = 0  # For sequential selection
+
 # Simple in-memory rate limiter storage
 rate_limiter_storage: Dict[str, list] = defaultdict(list)
+mvp_rate_limiter_storage: Dict[str, list] = defaultdict(list)  # Separate rate limiter for MVP
 
 # Request model
 class GenerationRequest(BaseModel):
@@ -92,6 +103,12 @@ class GenerationRequest(BaseModel):
     width: int = Field(default=1200, ge=100, le=3000, description="Image width in pixels")
     height: int = Field(default=630, ge=100, le=3000, description="Image height in pixels")
     model: Optional[str] = Field(default=None, description="Override default model for this request")
+
+# MVP Request model (simplified)
+class MVPGenerationRequest(BaseModel):
+    prompt: str = Field(..., description="User's prompt for image generation")
+    width: int = Field(default=1200, ge=100, le=1920, description="Image width in pixels (max 1920 for MVP)")
+    height: int = Field(default=630, ge=100, le=1080, description="Image height in pixels (max 1080 for MVP)")
 
 # Initialize Gemini AI
 def initialize_gemini(model_name: str = None):
@@ -136,6 +153,51 @@ async def check_rate_limit(request: Request):
     # Add current request
     rate_limiter_storage[client_ip].append(current_time)
     logger.debug(f"Current request count for {client_ip}: {len(rate_limiter_storage[client_ip])}")
+
+# MVP Rate limiting dependency
+async def check_mvp_rate_limit(request: Request):
+    """Simple IP-based rate limiting for MVP endpoints."""
+    client_ip = request.client.host
+    current_time = datetime.now()
+    
+    logger.debug(f"MVP Rate limit check for IP: {client_ip}")
+    
+    # Clean old requests outside the window
+    mvp_rate_limiter_storage[client_ip] = [
+        req_time for req_time in mvp_rate_limiter_storage[client_ip]
+        if current_time - req_time < timedelta(seconds=MVP_RATE_LIMIT_WINDOW)
+    ]
+    
+    # Check if rate limit exceeded
+    if len(mvp_rate_limiter_storage[client_ip]) >= MVP_RATE_LIMIT_REQUESTS:
+        logger.warning(f"MVP Rate limit exceeded for IP: {client_ip}")
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Maximum {MVP_RATE_LIMIT_REQUESTS} requests per minute.",
+            headers={"Retry-After": "60"}
+        )
+    
+    # Add current request
+    mvp_rate_limiter_storage[client_ip].append(current_time)
+    logger.debug(f"Current MVP request count for {client_ip}: {len(mvp_rate_limiter_storage[client_ip])}")
+
+def get_next_prompt_template() -> dict:
+    """Get the next prompt template based on selection mode."""
+    global prompt_index_counter
+    
+    if PROMPT_SELECTION_MODE == "sequential":
+        template = DESIGN_PROMPTS[prompt_index_counter % len(DESIGN_PROMPTS)]
+        prompt_index_counter += 1
+        logger.debug(f"Selected sequential prompt: {template['name']} (index: {prompt_index_counter-1})")
+    else:  # random
+        template = random.choice(DESIGN_PROMPTS)
+        logger.debug(f"Selected random prompt: {template['name']}")
+    
+    return template
+
+def create_generation_prompt_with_template(user_prompt: str, template: dict) -> str:
+    """Create the system prompt using selected template."""
+    return template["prompt"].format(user_prompt=user_prompt)
 
 def create_generation_prompt(user_prompt: str) -> str:
     """Create the system prompt for HTML generation."""
@@ -271,9 +333,10 @@ async def generate_visual_asset(
     """Main logic for generating visual assets."""
     logger.info(f"Starting visual asset generation for IP: {client_ip}, prompt: '{request.prompt[:50]}...'")
     
-    # Create generation prompt
-    full_prompt = create_generation_prompt(request.prompt)
-    logger.debug(f"Generated system prompt length: {len(full_prompt)} characters")
+    # Get random/sequential prompt template
+    prompt_template = get_next_prompt_template()
+    full_prompt = create_generation_prompt_with_template(request.prompt, prompt_template)
+    logger.info(f"Using prompt template: {prompt_template['name']}")
     
     # Generate HTML with Gemini
     html_content = await generate_html_with_gemini(model, full_prompt, client_ip)
@@ -285,6 +348,32 @@ async def generate_visual_asset(
     image_bytes = await render_html_to_image(cleaned_html, request.width, request.height, client_ip)
     
     logger.info(f"Visual asset generation completed successfully for IP: {client_ip}")
+    return image_bytes
+
+# MVP version of generate_visual_asset (simplified)
+async def generate_visual_asset_mvp(
+    request: MVPGenerationRequest,
+    model,
+    client_ip: str
+) -> bytes:
+    """Simplified logic for generating visual assets in MVP mode."""
+    logger.info(f"[MVP] Starting visual asset generation for IP: {client_ip}, prompt: '{request.prompt[:50]}...'")
+    
+    # Get random/sequential prompt template
+    prompt_template = get_next_prompt_template()
+    full_prompt = create_generation_prompt_with_template(request.prompt, prompt_template)
+    logger.info(f"[MVP] Using prompt template: {prompt_template['name']}")
+    
+    # Generate HTML with Gemini
+    html_content = await generate_html_with_gemini(model, full_prompt, client_ip)
+    
+    # Clean HTML response
+    cleaned_html = clean_html_response(html_content)
+    
+    # Render HTML to image
+    image_bytes = await render_html_to_image(cleaned_html, request.width, request.height, client_ip)
+    
+    logger.info(f"[MVP] Visual asset generation completed successfully for IP: {client_ip}")
     return image_bytes
 
 def get_model_for_request(request: GenerationRequest):
@@ -317,6 +406,7 @@ async def startup_event():
         logger.info(f"✅ Default model: {GEMINI_MODEL}")
         logger.info(f"✅ Available models: {list(AVAILABLE_MODELS.keys())}")
         logger.info(f"✅ Rate limit: {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW}s")
+        logger.info(f"✅ MVP Rate limit: {MVP_RATE_LIMIT_REQUESTS} requests per {MVP_RATE_LIMIT_WINDOW}s")
     except Exception as e:
         logger.error(f"❌ Failed to initialize LayoutCraft Backend: {e}")
         raise
@@ -332,7 +422,65 @@ async def health_check():
         "available_models": list(AVAILABLE_MODELS.keys())
     }
 
+# ==================== MVP ENDPOINTS ====================
+
 @app.post("/api/generate")
+async def generate_image_mvp(
+    request: MVPGenerationRequest,
+    http_request: Request,
+    _: None = Depends(check_mvp_rate_limit)
+):
+    """
+    MVP version: Generate a visual asset without authentication
+    - Simple rate limiting by IP
+    - Basic image generation
+    - No user tracking or premium features
+    """
+    client_ip = http_request.client.host
+    request_id = f"mvp_{client_ip}_{int(time.time())}"
+    
+    logger.info(f"[MVP][{request_id}] Generation request from IP: {client_ip}")
+    
+    start_time = time.time()
+    
+    try:
+        # Use default model for MVP
+        model = gemini_model
+        
+        # Generate the visual asset
+        image_bytes = await generate_visual_asset_mvp(request, model, client_ip)
+        
+        # Calculate generation time
+        generation_time = int((time.time() - start_time) * 1000)
+        
+        logger.info(f"[MVP][{request_id}] Generation completed successfully in {generation_time}ms")
+        
+        # Return the image
+        return StreamingResponse(
+            io.BytesIO(image_bytes),
+            media_type="image/png",
+            headers={
+                "Content-Disposition": "inline; filename=generated-image.png",
+                "Cache-Control": "no-cache",
+                "X-Request-ID": request_id,
+                "X-Generation-Time": str(generation_time),
+                "X-Mode": "MVP"
+            }
+        )
+        
+    except HTTPException as e:
+        logger.error(f"[MVP][{request_id}] HTTP error: {e.status_code} - {e.detail}")
+        raise
+    except Exception as e:
+        logger.error(f"[MVP][{request_id}] Unexpected error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error during image generation: {str(e)}"
+        )
+
+# ==================== EXISTING PREMIUM ENDPOINTS (UNCHANGED) ====================
+
+@app.post("/api/generate-premium")
 async def generate_image(
     request: GenerationRequest,
     http_request: Request,
@@ -439,7 +587,8 @@ async def generate_image(
                 "X-Generation-Time": str(generation_time),
                 "X-Generation-ID": generation_record["id"] if generation_record else "unknown",
                 "X-User-Tier": user_tier,
-                "X-Queue-Priority": str(priority)
+                "X-Queue-Priority": str(priority),
+                "X-Design-Template": prompt_template['name'] 
             }
         )
         
@@ -462,13 +611,22 @@ async def root():
         "model": GEMINI_MODEL,
         "available_models": list(AVAILABLE_MODELS.keys()),
         "endpoints": {
-            "generate": "/api/generate",
+            "generate": "/api/generate (MVP - No Auth)",
+            "generate_premium": "/api/generate-premium (Full Features)",
             "health": "/health", 
             "auth": "/auth",
             "users": "/users",
             "billing": "/billing",
             "premium": "/premium",
-            "advanced": "/advanced"  # New advanced features
+            "advanced": "/advanced"
+        },
+        "mvp_info": {
+            "description": "MVP endpoint available at /api/generate without authentication",
+            "rate_limit": f"{MVP_RATE_LIMIT_REQUESTS} requests per minute",
+            "max_dimensions": "1920x1080",
+            "supported_formats": ["png"],
+            "design_templates": [template["name"] for template in DESIGN_PROMPTS],
+            "prompt_selection_mode": PROMPT_SELECTION_MODE
         }
     }
 
