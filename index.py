@@ -109,6 +109,7 @@ class MVPGenerationRequest(BaseModel):
     prompt: str = Field(..., description="User's prompt for image generation")
     width: int = Field(default=1200, ge=100, le=1920, description="Image width in pixels (max 1920 for MVP)")
     height: int = Field(default=630, ge=100, le=1080, description="Image height in pixels (max 1080 for MVP)")
+    model:str = Field(default=None, description="Override default model for this request (MVP)")
 
 # Initialize Gemini AI
 def initialize_gemini(model_name: str = None):
@@ -445,7 +446,11 @@ async def generate_image_mvp(
     
     try:
         # Use default model for MVP
-        model = gemini_model
+        if request.model:
+            model = initialize_gemini(request.model)
+        else:            
+            model = gemini_model
+
         
         # Generate the visual asset
         image_bytes = await generate_visual_asset_mvp(request, model, client_ip)
@@ -478,6 +483,14 @@ async def generate_image_mvp(
             detail=f"Unexpected error during image generation: {str(e)}"
         )
 
+
+# MVP feedback endpoint 
+@app.post("/api/feedback")
+async def submit_feedback(feedback_data: dict, _: None = Depends(check_mvp_rate_limit)):
+    """MVP feedback endpoint (placeholder)"""
+    logger.info(f"[MVP] Feedback email: {feedback_data.get('email', 'anonymous')}")
+    logger.info(f"[MVP] Feedback received: {feedback_data.get('message', '')[:300]}...")
+    return {"status": "success", "message": "Thank you for your feedback!"}
 # ==================== EXISTING PREMIUM ENDPOINTS (UNCHANGED) ====================
 
 @app.post("/api/generate-premium")

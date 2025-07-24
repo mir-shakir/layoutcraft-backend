@@ -22,6 +22,8 @@ COMMON_INSTRUCTIONS = """
 - If user mentions specific colors - incorporate them as primary palette
 - If user requests specific style - prioritize that over template defaults
 - Respect any layout, size, or content specifications mentioned
+- Avoid adding any made-up content or generic placeholders
+- If user prompt is vague, use best judgment to create a high-quality design
 
 **TEXT HANDLING:**
 - Only include text that adds real value to the design
