@@ -1,0 +1,15 @@
+# .github/workflows/heartbeat.yml
+
+name: Keep Service Alive
+
+on:
+  schedule:
+    # Runs every 10 minutes to be safe
+    - cron: '*/10 * * * *'
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the service
+        run: curl -s "https://layoutcraft-backend.onrender.com/" || exit 0
