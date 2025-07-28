@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request, Depends,status
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field , EmailStr
 from dotenv import load_dotenv
 import google.generativeai as genai
 from playwright.async_api import async_playwright
@@ -31,6 +31,7 @@ from services.generation_service import GenerationService
 from auth.middleware import get_auth_middleware
 from services.premium_service import PremiumService
 from services.export_service import ExportService
+import httpx
 
 # Load environment variables
 load_dotenv()
@@ -111,6 +112,13 @@ class MVPGenerationRequest(BaseModel):
     height: int = Field(default=630, ge=100, le=1080, description="Image height in pixels (max 1080 for MVP)")
     model:str = Field(default=None, description="Override default model for this request (MVP)")
     theme:str = Field(default="auto", description="Theme for the image generation (MVP)")
+
+class FeedbackData(BaseModel):
+    email: EmailStr
+    message: str
+    source: str
+    user_agent: str
+    timestamp: str
 
 # Initialize Gemini AI
 def initialize_gemini(model_name: str = None):
@@ -550,46 +558,44 @@ async def generate_image_mvp(
             status_code=500,
             detail=f"Unexpected error during image generation: {str(e)}"
         )
-#  const response = await fetch(`${this.API_BASE_URL}/api/feedback`, {
-#                     method: 'POST',
-#                     headers: { 'Content-Type': 'application/json' },
-#                     body: JSON.stringify({
-#                         email: this.standaloneEmail.trim(),
-#                         message: this.standaloneFeedbackMessage.trim(),
-#                         source: "MVP Standalone Feedback Form",
-#                         user_agent: navigator.userAgent,
-#                         timestamp: new Date().toISOString()
-#                     })
-#                 });
 
-# MVP feedback endpoint 
 @app.post("/api/feedback")
-async def submit_feedback(feedback_data: dict, _: None = Depends(check_mvp_rate_limit)):
-    """MVP feedback endpoint : use this to submit feedback to google sheet"""
-    try:
-        # Validate feedback data
-        if not feedback_data.get("email") or not feedback_data.get("message"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email and message are required"
-            )
-        
-        # Log feedback submission
-        logger.info(f"Feedback received from {feedback_data['email']}: {feedback_data['message']}")
-        
-        # Here you would typically save the feedback to a database or send it to an external service
-        # For now, we just log it
-        
-        return {"status": "success", "message": "Feedback submitted successfully"}
-        
-    except HTTPException as e:
-        logger.error(f"HTTP error: {e.status_code} - {e.detail}")
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+async def submit_feedback(data: FeedbackData, _: None = Depends(check_mvp_rate_limit)):
+    """
+    Receives feedback from the frontend and securely forwards it to a Google Sheet
+    via a Google Apps Script Web App.
+    """
+    google_sheet_url = os.getenv("GOOGLE_SHEET_WEB_APP_URL")
+
+    if not google_sheet_url:
+        logger.error("GOOGLE_SHEET_WEB_APP_URL environment variable is not set.")
         raise HTTPException(
-            status_code=500,
-            detail=f"Unexpected error during feedback submission: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server is not configured to handle feedback."
+        )
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            # Forward the validated data to your Google Apps Script
+            response = await client.post(google_sheet_url, json=data.model_dump())
+
+            # Check if the request to Google Sheets was successful
+            response.raise_for_status()
+
+        logger.info(f"Feedback successfully submitted to Google Sheets from {data.email}")
+        return {"status": "success", "message": "Feedback submitted successfully."}
+
+    except httpx.RequestError as e:
+        logger.error(f"Could not connect to Google Sheets webhook: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to submit feedback due to a server-side connection issue."
+        )
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during feedback submission: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred."
         )
  
 # ==================== EXISTING PREMIUM ENDPOINTS (UNCHANGED) ====================
