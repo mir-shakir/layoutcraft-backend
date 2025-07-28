@@ -7,7 +7,7 @@ COMMON_INSTRUCTIONS = """
 - Your response must ONLY contain raw HTML code starting with `<!DOCTYPE html>` and ending with `</html>`
 - NO explanations, NO markdown fences, NO additional text outside HTML
 - ALL styling must be within a single `<style>` tag in the HTML head
-- Container dimensions must be exactly as specified (default: 1200x630px)
+- Container dimensions must be exactly 1200x630px
 - No external files, no JavaScript, no CDN links allowed
 
 **QUALITY STANDARDS:**
@@ -38,6 +38,7 @@ COMMON_INSTRUCTIONS = """
 - Apply sophisticated typography hierarchy when text is appropriate
 - Ensure responsive design principles within fixed dimensions
 - Optimize for visual impact and professional presentation
+- Most Important: Use div with .container with exact dimensions and no shadows to contain all content and facilitate easy screenshots capture. there should be no other element with this class.
 """
 
 DESIGN_PROMPTS = [

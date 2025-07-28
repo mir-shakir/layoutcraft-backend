@@ -72,7 +72,7 @@ app.include_router(advanced_router)
 # Configuration constants
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")  # Default to 2.5-flash
-GENERATION_TIMEOUT = int(os.getenv("GENERATION_TIMEOUT", "120"))  # 2 minutes default
+GENERATION_TIMEOUT = int(os.getenv("GENERATION_TIMEOUT", "180"))  # 2 minutes default
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "10"))  # requests per minute
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # seconds
 
@@ -110,6 +110,7 @@ class MVPGenerationRequest(BaseModel):
     width: int = Field(default=1200, ge=100, le=1920, description="Image width in pixels (max 1920 for MVP)")
     height: int = Field(default=630, ge=100, le=1080, description="Image height in pixels (max 1080 for MVP)")
     model:str = Field(default=None, description="Override default model for this request (MVP)")
+    theme:str = Field(default="auto", description="Theme for the image generation (MVP)")
 
 # Initialize Gemini AI
 def initialize_gemini(model_name: str = None):
@@ -195,6 +196,18 @@ def get_next_prompt_template() -> dict:
         logger.debug(f"Selected random prompt: {template['name']}")
     
     return template
+def get_design_prompt_template(theme: str) -> dict:
+    """Get a design prompt template based on the specified theme."""
+    if theme == "auto":
+        return random.choice(DESIGN_PROMPTS)
+    # Get theme using name
+    for template in DESIGN_PROMPTS:
+        if template["name"].lower() == theme.lower():
+            logger.debug(f"Selected design prompt for theme '{theme}': {template['name']}")
+            return template
+    # If no match found, return a default or raise an error
+    logger.warning(f"No design prompt found for theme '{theme}', using default")
+    return get_next_prompt_template()  # Fallback to random template if not found
 
 def create_generation_prompt_with_template(user_prompt: str, template: dict) -> str:
     """Create the system prompt using selected template."""
@@ -225,6 +238,7 @@ def create_generation_prompt(user_prompt: str) -> str:
 - No external files, no JavaScript, and no explanations or markdown in your response.
 
 ---
+
 **User's Core Idea:**
 "{user_prompt}"
 ---
@@ -288,8 +302,48 @@ def clean_html_response(html_content: str) -> str:
     
     return html_content
 
+# async def render_html_to_image(html_content: str, width: int, height: int, client_ip: str) -> bytes:
+#     """Render HTML to PNG image using Playwright."""
+#     start_time = time.time()
+#     logger.info(f"Starting HTML rendering to image ({width}x{height}) for IP: {client_ip}")
+    
+#     try:
+#         async with async_playwright() as p:
+#             browser = await p.chromium.launch(headless=True)
+#             page = await browser.new_page()
+            
+#             # Set viewport size to match requested dimensions
+#             await page.set_viewport_size({"width": width, "height": height})
+            
+#             # Set HTML content
+#             await page.set_content(html_content, wait_until="networkidle")
+            
+#             # Take screenshot
+#             screenshot_bytes = await page.screenshot(
+#                 type="png",
+#                 full_page=False,
+#                 clip={"x": 0, "y": 0, "width": width, "height": height}
+#             )
+            
+#             await browser.close()
+            
+#             render_time = time.time() - start_time
+#             image_size = len(screenshot_bytes)
+#             logger.info(f"Image rendered in {render_time:.2f}s, size: {image_size} bytes for IP: {client_ip}")
+            
+#             return screenshot_bytes
+            
+#     except Exception as e:
+#         logger.error(f"Error in HTML rendering for IP {client_ip}: {str(e)}")
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"Error rendering image: {str(e)}"
+#         )
+# This is inside your ImageCreationService class in index.py
+# This is inside your ImageCreationService class in index.py
+
 async def render_html_to_image(html_content: str, width: int, height: int, client_ip: str) -> bytes:
-    """Render HTML to PNG image using Playwright."""
+    """Render HTML to PNG image using Playwright with a fallback mechanism."""
     start_time = time.time()
     logger.info(f"Starting HTML rendering to image ({width}x{height}) for IP: {client_ip}")
     
@@ -298,18 +352,32 @@ async def render_html_to_image(html_content: str, width: int, height: int, clien
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             
-            # Set viewport size to match requested dimensions
             await page.set_viewport_size({"width": width, "height": height})
-            
-            # Set HTML content
             await page.set_content(html_content, wait_until="networkidle")
+
+            # --- START OF NEW ROBUST FIX ---
+            screenshot_bytes = None
             
-            # Take screenshot
-            screenshot_bytes = await page.screenshot(
-                type="png",
-                full_page=False,
-                clip={"x": 0, "y": 0, "width": width, "height": height}
-            )
+            # Try to locate the preferred element first, with a short timeout.
+            try:
+                container = page.locator('.container').first
+                # Use a short timeout (e.g., 2 seconds) to avoid long waits
+                await container.wait_for(timeout=2000) 
+                
+                logger.info(f"Found '.container' element. Taking element screenshot.")
+                screenshot_bytes = await container.screenshot(type="png")
+
+            except Exception as e:
+                # This will catch timeout errors or if the element is not found.
+                logger.warning(f"Could not find '.container' element, falling back to full-page screenshot. Reason: {e}")
+                
+                # Fallback to the original full-page screenshot method.
+                # This might have the scrollbar issue, but it's better than failing.
+                screenshot_bytes = await page.screenshot(
+                    type="png",
+                    clip={"x": 0, "y": 0, "width": width, "height": height}
+                )
+            # --- END OF NEW ROBUST FIX ---
             
             await browser.close()
             
@@ -325,7 +393,6 @@ async def render_html_to_image(html_content: str, width: int, height: int, clien
             status_code=500,
             detail=f"Error rendering image: {str(e)}"
         )
-
 async def generate_visual_asset(
     request: GenerationRequest,
     model,
@@ -355,13 +422,14 @@ async def generate_visual_asset(
 async def generate_visual_asset_mvp(
     request: MVPGenerationRequest,
     model,
-    client_ip: str
+    client_ip: str,
 ) -> bytes:
     """Simplified logic for generating visual assets in MVP mode."""
     logger.info(f"[MVP] Starting visual asset generation for IP: {client_ip}, prompt: '{request.prompt[:50]}...'")
     
     # Get random/sequential prompt template
     prompt_template = get_next_prompt_template()
+    prompt_template = get_design_prompt_template(request.theme)
     full_prompt = create_generation_prompt_with_template(request.prompt, prompt_template)
     logger.info(f"[MVP] Using prompt template: {prompt_template['name']}")
     
@@ -482,15 +550,48 @@ async def generate_image_mvp(
             status_code=500,
             detail=f"Unexpected error during image generation: {str(e)}"
         )
-
+#  const response = await fetch(`${this.API_BASE_URL}/api/feedback`, {
+#                     method: 'POST',
+#                     headers: { 'Content-Type': 'application/json' },
+#                     body: JSON.stringify({
+#                         email: this.standaloneEmail.trim(),
+#                         message: this.standaloneFeedbackMessage.trim(),
+#                         source: "MVP Standalone Feedback Form",
+#                         user_agent: navigator.userAgent,
+#                         timestamp: new Date().toISOString()
+#                     })
+#                 });
 
 # MVP feedback endpoint 
 @app.post("/api/feedback")
 async def submit_feedback(feedback_data: dict, _: None = Depends(check_mvp_rate_limit)):
-    """MVP feedback endpoint (placeholder)"""
-    logger.info(f"[MVP] Feedback email: {feedback_data.get('email', 'anonymous')}")
-    logger.info(f"[MVP] Feedback received: {feedback_data.get('message', '')[:300]}...")
-    return {"status": "success", "message": "Thank you for your feedback!"}
+    """MVP feedback endpoint : use this to submit feedback to google sheet"""
+    try:
+        # Validate feedback data
+        if not feedback_data.get("email") or not feedback_data.get("message"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email and message are required"
+            )
+        
+        # Log feedback submission
+        logger.info(f"Feedback received from {feedback_data['email']}: {feedback_data['message']}")
+        
+        # Here you would typically save the feedback to a database or send it to an external service
+        # For now, we just log it
+        
+        return {"status": "success", "message": "Feedback submitted successfully"}
+        
+    except HTTPException as e:
+        logger.error(f"HTTP error: {e.status_code} - {e.detail}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error during feedback submission: {str(e)}"
+        )
+ 
 # ==================== EXISTING PREMIUM ENDPOINTS (UNCHANGED) ====================
 
 @app.post("/api/generate-premium")
