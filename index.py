@@ -708,7 +708,7 @@ async def generate_image(
                 "X-Generation-ID": generation_record["id"] if generation_record else "unknown",
                 "X-User-Tier": user_tier,
                 "X-Queue-Priority": str(priority),
-                "X-Design-Template": prompt_template['name'] 
+                # "X-Design-Template": prompt_template['name'] // todo fix this. commenting out for now
             }
         )
         
