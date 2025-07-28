@@ -37,4 +37,5 @@ EXPOSE 8000
 # The command to run when the container starts.
 # We use "--host 0.0.0.0" to make the server accessible from outside the container.
 # Render will automatically set the $PORT environment variable.
-CMD ["uvicorn", "index:app", "--host", "0.0.0.0", "--port", "$PORT"]
+# CMD ["uvicorn", "index:app", "--host", "0.0.0.0", "--port", "$PORT"]
+CMD uvicorn index:app --host 0.0.0.0 --port $PORT
