@@ -9,12 +9,15 @@ COMMON_INSTRUCTIONS = """
 - ALL styling must be within a single `<style>` tag in the HTML head
 - Container dimensions must be exactly 1200x630px
 - No external files, no JavaScript, no CDN links allowed
+- Only Font Awesome icons are allowed, and the cdn link to use for that is "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.0/css/all.min.css". you can use it in the HTML.
+- For Fonts Use standard fonts from google fonts and import only the ones you need. Add the required font import in the HTML head.
 
 **QUALITY STANDARDS:**
 - Aim for EXCEPTIONAL, award-winning design quality
 - Create designs worthy of premium design portfolios
 - Every element must be purposeful and professionally crafted
 - Use modern design principles and contemporary aesthetics
+- Maximize use of Font Awesome icons to fulfil user requests
 
 **USER REQUIREMENTS COMPLIANCE:**
 - STRICTLY follow any specific requirements from the user prompt

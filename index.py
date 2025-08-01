@@ -443,6 +443,7 @@ async def generate_visual_asset_mvp(
     # Generate HTML with Gemini
     html_content = await generate_html_with_gemini(model, full_prompt, client_ip)
     
+    logger.info(f"[MVP] HTML generation completed for IP: {client_ip}, length: {len(html_content)} characters")
     # Clean HTML response
     cleaned_html = clean_html_response(html_content)
     
