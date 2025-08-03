@@ -4,7 +4,7 @@ import time
 import logging
 import random
 from prompts.design_prompts import DESIGN_PROMPTS
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -73,6 +73,7 @@ app.include_router(advanced_router)
 # Configuration constants
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")  # Default to 2.5-flash
+PRO_GEMINI_MODEL = os.getenv("PRO_GEMINI_MODEL", "gemini-2.5-pro")  # Default to 2.5-pro
 GENERATION_TIMEOUT = int(os.getenv("GENERATION_TIMEOUT", "180"))  # 2 minutes default
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "10"))  # requests per minute
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # seconds
@@ -83,9 +84,6 @@ MVP_RATE_LIMIT_WINDOW = int(os.getenv("MVP_RATE_LIMIT_WINDOW", "60"))  # seconds
 
 # Available models for easy switching
 AVAILABLE_MODELS = {
-    "gemini-1.5-flash": "gemini-1.5-flash",
-    "gemini-1.5-pro": "gemini-1.5-pro", 
-    "gemini-2.0-flash": "gemini-2.0-flash-exp",
     "gemini-2.5-flash": "gemini-2.5-flash",  # Add when available
     "gemini-2.5-pro": "gemini-2.5-pro"      # Add when available
 }
@@ -97,6 +95,8 @@ prompt_index_counter = 0  # For sequential selection
 # Simple in-memory rate limiter storage
 rate_limiter_storage: Dict[str, list] = defaultdict(list)
 mvp_rate_limiter_storage: Dict[str, list] = defaultdict(list)  # Separate rate limiter for MVP
+# A set is used for O(1) lookups, which is extremely fast.
+pro_usage_tracker: Set[str] = set()
 
 # Request model
 class GenerationRequest(BaseModel):
@@ -407,7 +407,7 @@ async def generate_visual_asset(
     client_ip: str
 ) -> bytes:
     """Main logic for generating visual assets."""
-    logger.info(f"Starting visual asset generation for IP: {client_ip}, prompt: '{request.prompt[:50]}...'")
+    logger.info(f"Starting visual asset generation for IP: {client_ip}, prompt: '{request.prompt}...'")
     
     # Get random/sequential prompt template
     prompt_template = get_next_prompt_template()
@@ -433,17 +433,17 @@ async def generate_visual_asset_mvp(
     client_ip: str,
 ) -> bytes:
     """Simplified logic for generating visual assets in MVP mode."""
-    logger.info(f"[MVP] Starting visual asset generation for IP: {client_ip}, prompt: '{request.prompt[:50]}...'")
     
     # Get random/sequential prompt template
     prompt_template = get_next_prompt_template()
     prompt_template = get_design_prompt_template(request.theme)
     full_prompt = create_generation_prompt_with_template(request.prompt, prompt_template)
-    logger.info(f"[MVP] Using prompt template: {prompt_template['name']}")
+    logger.info(f"[MVP] Using prompt template: {prompt_template['name']} And prompt length: {len(full_prompt)} characters")
     
     # Generate HTML with Gemini
     html_content = await generate_html_with_gemini(model, full_prompt, client_ip)
     
+    logger.info(f"[MVP] HTML generation completed for IP: {client_ip}, length: {len(html_content)} characters")
     # Clean HTML response
     cleaned_html = clean_html_response(html_content)
     
@@ -472,15 +472,19 @@ def get_model_for_request(request: GenerationRequest):
 
 # Initialize Gemini model at startup
 gemini_model = None
+pro_gemini_model = None
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup."""
     global gemini_model
+    global pro_gemini_model
     try:
         gemini_model = initialize_gemini()
+        pro_gemini_model = initialize_gemini(PRO_GEMINI_MODEL)
         logger.info("✅ LayoutCraft Backend started successfully")
         logger.info(f"✅ Default model: {GEMINI_MODEL}")
+        logger.info(f"✅ Pro model: {PRO_GEMINI_MODEL}")
         logger.info(f"✅ Available models: {list(AVAILABLE_MODELS.keys())}")
         logger.info(f"✅ Rate limit: {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW}s")
         logger.info(f"✅ MVP Rate limit: {MVP_RATE_LIMIT_REQUESTS} requests per {MVP_RATE_LIMIT_WINDOW}s")
@@ -500,7 +504,7 @@ async def health_check():
     }
 
 # ==================== MVP ENDPOINTS ====================
-
+# No authorization. 1 pro request per ip rest fast model requests
 @app.post("/api/generate")
 async def generate_image_mvp(
     request: MVPGenerationRequest,
@@ -521,16 +525,25 @@ async def generate_image_mvp(
     start_time = time.time()
     
     try:
-        # Use default model for MVP
-        if request.model:
-            model = initialize_gemini(request.model)
-        else:            
-            model = gemini_model
+        model_to_use = gemini_model # Default to the fast model
+        if request.model and 'pro' in request.model.lower():
+            if client_ip in pro_usage_tracker:
+                # This IP has already used its free Pro generation.
+                # Silently downgrade to the standard model.
+                logger.warning(f"[MVP][{request_id}] Pro limit reached for IP: {client_ip}. Downgrading to fast model.")
+                model_to_use = gemini_model
+            else:
+                # This is the first Pro request for this IP.
+                logger.info(f"[MVP][{request_id}] Granting one-time Pro access for IP: {client_ip}.")
+                model_to_use = pro_gemini_model
+                # IMPORTANT: Record that this IP has now used its Pro credit.
+                pro_usage_tracker.add(client_ip)
 
-        
+
+        logger.info(f"[MVP-Anonymous] Starting visual asset generation for IP: {client_ip}, prompt: '{request.prompt}...'")
         # Generate the visual asset
-        image_bytes = await generate_visual_asset_mvp(request, model, client_ip)
-        
+        image_bytes = await generate_visual_asset_mvp(request, model_to_use, client_ip)
+
         # Calculate generation time
         generation_time = int((time.time() - start_time) * 1000)
         
@@ -598,6 +611,71 @@ async def submit_feedback(data: FeedbackData, _: None = Depends(check_mvp_rate_l
             detail="An unexpected error occurred."
         )
  
+
+
+#  =======================New Authenticated Endpoints ============================
+
+
+@app.post("/api/v1/generate")
+async def generate_image_mvp(
+    request: MVPGenerationRequest,
+    http_request: Request,
+    current_user: dict = Depends(get_current_user),
+    _: None = Depends(check_mvp_rate_limit)
+):
+    """
+    MVP version: Generate a visual asset without authentication
+    - Simple rate limiting by IP
+    - Basic image generation
+    - No user tracking or premium features
+    """
+    client_ip = http_request.client.host
+    request_id = f"mvp_{client_ip}_{int(time.time())}"
+
+    logger.info(f"[MVP-LoggedIn][{request_id}] Generation request from IP: {client_ip} And User: {current_user['email']}")
+
+    start_time = time.time()
+    
+    try:
+        if request.model and 'pro' in request.model.lower():
+            model = pro_gemini_model
+        else:
+            model = gemini_model
+
+
+        logger.info(f"[MVP] Starting visual asset generation for User: {current_user['email']}, prompt: '{request.prompt}'")
+        # Generate the visual asset
+        image_bytes = await generate_visual_asset_mvp(request, model, client_ip)
+        
+        # Calculate generation time
+        generation_time = int((time.time() - start_time) * 1000)
+        
+        logger.info(f"[MVP][{request_id}] Generation completed successfully in {generation_time}ms")
+        
+        # Return the image
+        return StreamingResponse(
+            io.BytesIO(image_bytes),
+            media_type="image/png",
+            headers={
+                "Content-Disposition": "inline; filename=generated-image.png",
+                "Cache-Control": "no-cache",
+                "X-Request-ID": request_id,
+                "X-Generation-Time": str(generation_time),
+                "X-Mode": "MVP"
+            }
+        )
+        
+    except HTTPException as e:
+        logger.error(f"[MVP][{request_id}] HTTP error: {e.status_code} - {e.detail}")
+        raise
+    except Exception as e:
+        logger.error(f"[MVP][{request_id}] Unexpected error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error during image generation: {str(e)}"
+        )
+
+
 # ==================== EXISTING PREMIUM ENDPOINTS (UNCHANGED) ====================
 
 @app.post("/api/generate-premium")

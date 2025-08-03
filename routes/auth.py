@@ -61,7 +61,7 @@ async def register(request: RegisterRequest):
     auth_middleware = get_auth_middleware()
     
     try:
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:8080")
         # Validate inputs
         if not validate_email(request.email):
             raise HTTPException(
