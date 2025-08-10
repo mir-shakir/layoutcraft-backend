@@ -7,7 +7,7 @@ COMMON_INSTRUCTIONS = """
 - Your response must ONLY contain raw HTML code starting with `<!DOCTYPE html>` and ending with `</html>`
 - NO explanations, NO markdown fences, NO additional text outside HTML
 - ALL styling must be within a single `<style>` tag in the HTML head
-- Container dimensions must be exactly 1200x630px
+- Container dimensions must be exactly specified in the prompt
 - No external files, no JavaScript, no CDN links allowed
 - Only Font Awesome icons are allowed, and the cdn link to use for that is "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.0/css/all.min.css". you can use it in the HTML.
 - For Fonts Use standard fonts from google fonts and import only the ones you need. Add the required font import in the HTML head.

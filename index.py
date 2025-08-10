@@ -4,6 +4,13 @@ import time
 import logging
 import random
 from prompts.design_prompts import DESIGN_PROMPTS
+from config.dimension_presets import (
+    get_preset_dimensions, 
+    get_default_preset, 
+    create_dynamic_prompt_context,
+    validate_preset_name,
+    DEFAULT_PRESET
+)
 from typing import Dict, List, Optional, Set
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -108,10 +115,9 @@ class GenerationRequest(BaseModel):
 # MVP Request model (simplified)
 class MVPGenerationRequest(BaseModel):
     prompt: str = Field(..., description="User's prompt for image generation")
-    width: int = Field(default=1200, ge=100, le=1920, description="Image width in pixels (max 1920 for MVP)")
-    height: int = Field(default=630, ge=100, le=1080, description="Image height in pixels (max 1080 for MVP)")
     model:str = Field(default=None, description="Override default model for this request (MVP)")
     theme:str = Field(default="auto", description="Theme for the image generation (MVP)")
+    size_preset: Optional[str] = Field(default=None, description="Predefined size preset (e.g., 'blog_header', 'social_square')")
 
 class FeedbackData(BaseModel):
     email: EmailStr
@@ -217,9 +223,32 @@ def get_design_prompt_template(theme: str) -> dict:
     logger.warning(f"No design prompt found for theme '{theme}', using default")
     return get_next_prompt_template()  # Fallback to random template if not found
 
-def create_generation_prompt_with_template(user_prompt: str, template: dict) -> str:
-    """Create the system prompt using selected template."""
-    return template["prompt"].format(user_prompt=user_prompt)
+def create_generation_prompt_with_template(user_prompt: str, template: dict, preset_context: str = "", width: int = 1200, height: int = 630) -> str:
+    """Create the system prompt using selected template and optional preset context."""
+    base_prompt = template["prompt"].format(user_prompt=user_prompt)
+    
+    # Inject dimension information into the prompt
+    dimension_context = f"**CRITICAL DIMENSION REQUIREMENT:**\n- The container must be exactly {width}x{height} pixels\n- Use width: {width}px; height: {height}px; in your CSS container\n\n"
+    
+    # Find insertion point for dimension context
+    context_insertion_point = base_prompt.find("**User's Core Idea:**")
+    if context_insertion_point != -1:
+        enhanced_prompt = base_prompt[:context_insertion_point]
+        
+        # Add dimension context
+        enhanced_prompt += dimension_context
+        
+        # Add preset context if available
+        if preset_context:
+            enhanced_prompt += f"**Design Context:**\n{preset_context}\n\n"
+        
+        # Add the user's core idea section
+        enhanced_prompt += base_prompt[context_insertion_point:]
+        
+        return enhanced_prompt
+    
+    # Fallback: prepend dimension context if no insertion point found
+    return dimension_context + base_prompt
 
 def create_generation_prompt(user_prompt: str) -> str:
     """Create the system prompt for HTML generation."""
@@ -411,7 +440,7 @@ async def generate_visual_asset(
     
     # Get random/sequential prompt template
     prompt_template = get_next_prompt_template()
-    full_prompt = create_generation_prompt_with_template(request.prompt, prompt_template)
+    full_prompt = create_generation_prompt_with_template(request.prompt, prompt_template, "", request.width, request.height)
     logger.info(f"Using prompt template: {prompt_template['name']}")
     
     # Generate HTML with Gemini
@@ -426,6 +455,42 @@ async def generate_visual_asset(
     logger.info(f"Visual asset generation completed successfully for IP: {client_ip}")
     return image_bytes
 
+def resolve_dimensions_from_preset(request: MVPGenerationRequest) -> tuple[int, int, str]:
+    """
+    Resolve dimensions from size_preset if provided, otherwise use default preset.
+    
+    Args:
+        request: The MVP generation request
+        
+    Returns:
+        Tuple of (width, height, preset_context)
+    """
+    if request.size_preset and validate_preset_name(request.size_preset):
+        # Use preset dimensions
+        preset_data = get_preset_dimensions(request.size_preset)
+        width = preset_data["width"]
+        height = preset_data["height"]
+        preset_context = create_dynamic_prompt_context(request.size_preset)
+        logger.info(f"Using preset '{request.size_preset}': {width}x{height}")
+        return width, height, preset_context
+    elif request.size_preset:
+        # Invalid preset name provided, log warning and fall back to default
+        logger.warning(f"Invalid preset name '{request.size_preset}', using default preset '{DEFAULT_PRESET}'")
+        preset_data = get_default_preset()
+        width = preset_data["width"]
+        height = preset_data["height"]
+        preset_context = create_dynamic_prompt_context(DEFAULT_PRESET)
+        return width, height, preset_context
+    else:
+        # No preset specified, use default preset
+        preset_data = get_default_preset()
+        width = preset_data["width"]
+        height = preset_data["height"]
+        preset_context = create_dynamic_prompt_context(DEFAULT_PRESET)
+        logger.info(f"Using default preset '{DEFAULT_PRESET}': {width}x{height}")
+        return width, height, preset_context
+
+
 # MVP version of generate_visual_asset (simplified)
 async def generate_visual_asset_mvp(
     request: MVPGenerationRequest,
@@ -434,21 +499,27 @@ async def generate_visual_asset_mvp(
 ) -> bytes:
     """Simplified logic for generating visual assets in MVP mode."""
     
-    # Get random/sequential prompt template
-    prompt_template = get_next_prompt_template()
-    prompt_template = get_design_prompt_template(request.theme)
-    full_prompt = create_generation_prompt_with_template(request.prompt, prompt_template)
-    logger.info(f"[MVP] Using prompt template: {prompt_template['name']} And prompt length: {len(full_prompt)} characters")
+    # Resolve dimensions from preset or use provided dimensions
+    width, height, preset_context = resolve_dimensions_from_preset(request)
+    logger.info(f"[MVP] Resolved dimensions: {width}x{height}, preset context: '{preset_context}'")
     
+    # Get design prompt template based on theme
+    prompt_template = get_design_prompt_template(request.theme)
+    
+    # Create full prompt with preset context and dimensions
+    full_prompt = create_generation_prompt_with_template(request.prompt, prompt_template, preset_context, width, height)
+    logger.info(f"[MVP] Using prompt template: {prompt_template['name']}, dimensions: {width}x{height}, prompt length: {len(full_prompt)} characters")  # Log first 100 chars for brevity
+
     # Generate HTML with Gemini
     html_content = await generate_html_with_gemini(model, full_prompt, client_ip)
+    logger.debug(f"[MVP] Generated HTML content : {html_content} ")
     
     logger.info(f"[MVP] HTML generation completed for IP: {client_ip}, length: {len(html_content)} characters")
     # Clean HTML response
     cleaned_html = clean_html_response(html_content)
     
-    # Render HTML to image
-    image_bytes = await render_html_to_image(cleaned_html, request.width, request.height, client_ip)
+    # Render HTML to image using resolved dimensions
+    image_bytes = await render_html_to_image(cleaned_html, width, height, client_ip)
     
     logger.info(f"[MVP] Visual asset generation completed successfully for IP: {client_ip}")
     return image_bytes
@@ -501,6 +572,19 @@ async def health_check():
         "timestamp": datetime.now().isoformat(),
         "model": GEMINI_MODEL,
         "available_models": list(AVAILABLE_MODELS.keys())
+    }
+
+@app.get("/api/presets")
+async def get_dimension_presets():
+    """Get available dimension presets for the frontend."""
+    from config.dimension_presets import get_preset_info_for_frontend, DEFAULT_PRESET
+    
+    preset_info = get_preset_info_for_frontend()
+    
+    return {
+        "presets": preset_info,
+        "default_preset": DEFAULT_PRESET,
+        "timestamp": datetime.now().isoformat()
     }
 
 # ==================== MVP ENDPOINTS ====================
@@ -821,10 +905,12 @@ async def root():
         "mvp_info": {
             "description": "MVP endpoint available at /api/generate without authentication",
             "rate_limit": f"{MVP_RATE_LIMIT_REQUESTS} requests per minute",
-            "max_dimensions": "1920x1080",
+            "dimension_system": "preset-based",
+            "default_preset": DEFAULT_PRESET,
             "supported_formats": ["png"],
             "design_templates": [template["name"] for template in DESIGN_PROMPTS],
-            "prompt_selection_mode": PROMPT_SELECTION_MODE
+            "prompt_selection_mode": PROMPT_SELECTION_MODE,
+            "presets_endpoint": "/api/presets"
         }
     }
 
