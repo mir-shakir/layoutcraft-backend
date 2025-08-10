@@ -351,6 +351,30 @@ Create a sophisticated editorial design that rivals premium magazine layouts wit
     }
 ]
 
+
+# Edit request prompts
+
+
+HTML_EDIT_PROMPT = """
+You are an expert frontend developer who specializes in modifying existing HTML code.
+Your task is to intelligently update the provided HTML based on a specific user request.
+
+**CRITICAL RULES:**
+1.  **MINIMAL CHANGES:** Your primary goal is to preserve the original design, layout, and styles. Only modify what is absolutely necessary to fulfill the user's request. Do not reinterpret the entire design.
+2.  **CODE-ONLY OUTPUT:** Your entire response MUST be the complete, raw, modified HTML code, starting with `<!DOCTYPE html>` and ending with `</html>`. Do NOT include explanations, comments, markdown fences (` ```html `), or any other text.
+3.  **VALID & SELF-CONTAINED:** The output must be a valid, self-contained HTML file with all styles remaining in the single `<style>` tag.
+
+---
+**ORIGINAL HTML CODE TO MODIFY:**
+```html
+{original_html}
+USER'S EDIT REQUEST: "{edit_prompt}"
+Based on the rules, provide the complete and modified HTML code now.
+"""
+
+
+
+
 # Function to get template by name (useful for debugging or specific selection)
 def get_template_by_name(name: str) -> dict:
     """Get a specific template by name."""

@@ -3,7 +3,7 @@ import asyncio
 import time
 import logging
 import random
-from prompts.design_prompts import DESIGN_PROMPTS
+from prompts.design_prompts import DESIGN_PROMPTS,HTML_EDIT_PROMPT
 from config.dimension_presets import (
     get_preset_dimensions, 
     get_default_preset, 
@@ -26,12 +26,12 @@ import io
 
 from routes.auth import router as auth_router
 from routes.users import router as users_router
-from routes.billing import router as billing_router
-from routes.advanced_generation import router as advanced_router
+# from routes.billing import router as billing_router
+# from routes.advanced_generation import router as advanced_router
 
 from auth.dependencies import get_current_user, check_usage_limits
 from auth.middleware import get_auth_middleware
-from models.generation import GenerationCreate
+from models.generation import GenerationCreate, GenerationResponse
 
 from services.user_service import UserService
 from services.generation_service import GenerationService
@@ -39,6 +39,10 @@ from auth.middleware import get_auth_middleware
 from services.premium_service import PremiumService
 from services.export_service import ExportService
 import httpx
+from fastapi.encoders import jsonable_encoder
+# Add these at the top of index.py
+import uuid
+from fastapi.responses import JSONResponse 
 
 # Load environment variables
 load_dotenv()
@@ -73,8 +77,8 @@ app.add_middleware(
 # Include routers
 app.include_router(auth_router)
 app.include_router(users_router)
-app.include_router(billing_router)
-app.include_router(advanced_router)
+# app.include_router(billing_router)
+# app.include_router(advanced_router)
 
 
 # Configuration constants
@@ -125,6 +129,9 @@ class FeedbackData(BaseModel):
     source: str
     user_agent: str
     timestamp: str
+
+class EditRequest(BaseModel):
+    edit_prompt: str = Field(..., description="The user's instruction for what to change.")
 
 # Initialize Gemini AI
 def initialize_gemini(model_name: str = None):
@@ -700,64 +707,155 @@ async def submit_feedback(data: FeedbackData, _: None = Depends(check_mvp_rate_l
 #  =======================New Authenticated Endpoints ============================
 
 
-@app.post("/api/v1/generate")
-async def generate_image_mvp(
+@app.post("/api/v1/generate", response_model=GenerationResponse)
+async def generate_image_authenticated( # Renamed for clarity
     request: MVPGenerationRequest,
     http_request: Request,
     current_user: dict = Depends(get_current_user),
     _: None = Depends(check_mvp_rate_limit)
+    # You can add back rate limiting or other dependencies here if needed
 ):
     """
-    MVP version: Generate a visual asset without authentication
-    - Simple rate limiting by IP
-    - Basic image generation
-    - No user tracking or premium features
+    Generates a visual asset for an authenticated user, saves it to storage and the database,
+    and returns the full generation record.
     """
     client_ip = http_request.client.host
-    request_id = f"mvp_{client_ip}_{int(time.time())}"
-
-    logger.info(f"[MVP-LoggedIn][{request_id}] Generation request from IP: {client_ip} And User: {current_user['email']}")
-
+    request_id = f"{current_user['id']}_{int(time.time())}"
+    logger.info(f"[Authenticated Generation][{request_id}] Request from user: {current_user['email']}")
     start_time = time.time()
-    
+
     try:
-        if request.model and 'pro' in request.model.lower():
-            model = pro_gemini_model
-        else:
-            model = gemini_model
+        # --- 1. Determine Model ---
+        model_to_use = pro_gemini_model if 'pro' in (request.model or '').lower() else gemini_model
 
-
-        logger.info(f"[MVP] Starting visual asset generation for User: {current_user['email']}, prompt: '{request.prompt}'")
-        # Generate the visual asset
-        image_bytes = await generate_visual_asset_mvp(request, model, client_ip)
-        
-        # Calculate generation time
-        generation_time = int((time.time() - start_time) * 1000)
-        
-        logger.info(f"[MVP][{request_id}] Generation completed successfully in {generation_time}ms")
-        
-        # Return the image
-        return StreamingResponse(
-            io.BytesIO(image_bytes),
-            media_type="image/png",
-            headers={
-                "Content-Disposition": "inline; filename=generated-image.png",
-                "Cache-Control": "no-cache",
-                "X-Request-ID": request_id,
-                "X-Generation-Time": str(generation_time),
-                "X-Mode": "MVP"
-            }
+        # --- 2. Generate HTML (Existing Logic) ---
+        width, height, preset_context = resolve_dimensions_from_preset(request)
+        prompt_template = get_design_prompt_template(request.theme)
+        full_prompt = create_generation_prompt_with_template(
+            request.prompt, prompt_template, preset_context, width, height
         )
-        
+        html_content = await generate_html_with_gemini(model_to_use, full_prompt, client_ip)
+        cleaned_html = clean_html_response(html_content)
+
+        # --- 3. Render Image (Existing Logic) ---
+        image_bytes = await render_html_to_image(cleaned_html, width, height, client_ip)
+
+        # --- 4. NEW: Upload Image to Supabase Storage ---
+        auth_middleware = get_auth_middleware()
+        file_path = f"{current_user['id']}/{uuid.uuid4()}.png"
+
+        # Use the Supabase client to upload
+        auth_middleware.supabase.storage.from_("generations").upload(
+            file=image_bytes,
+            path=file_path,
+            file_options={"content-type": "image/png"}
+        )
+
+        # Get the public URL for the uploaded image
+        image_url_response = auth_middleware.supabase.storage.from_("generations").get_public_url(file_path)
+        image_url = image_url_response
+
+        # --- 5. NEW: Save Generation Record to Database ---
+        generation_service = GenerationService(auth_middleware.supabase)
+        generation_time = int((time.time() - start_time) * 1000)
+
+        generation_data = GenerationCreate(
+            user_id=current_user["id"],
+            design_thread_id=uuid.uuid4(),  # New thread for a new generation
+            parent_id=None,                 # No parent for a new generation
+            prompt=request.prompt,
+            prompt_type='creation',
+            generated_html=cleaned_html,
+            image_url=image_url,
+            model_used=model_to_use.model_name.split('/')[-1],
+            theme=request.theme,
+            size_preset=request.size_preset or DEFAULT_PRESET,
+            generation_time_ms=generation_time
+        )
+
+        new_generation_record = await generation_service.create_generation(generation_data)
+        if not new_generation_record:
+            raise HTTPException(status_code=500, detail="Failed to save generation record.")
+
+        logger.info(f"[{request_id}] Generation saved with ID: {new_generation_record['id']}")
+
+        # --- 6. NEW: Return the Full Generation Object as JSON ---
+        pydantic_record = GenerationResponse.from_orm(new_generation_record)
+        response_content = jsonable_encoder(pydantic_record)
+        return JSONResponse(
+            status_code=status.HTTP_201_CREATED,
+            content=response_content
+        )
+
     except HTTPException as e:
-        logger.error(f"[MVP][{request_id}] HTTP error: {e.status_code} - {e.detail}")
+        logger.error(f"[{request_id}] HTTP error: {e.status_code} - {e.detail}")
         raise
     except Exception as e:
-        logger.error(f"[MVP][{request_id}] Unexpected error: {str(e)}")
+        logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=f"Unexpected error during image generation: {str(e)}"
         )
+
+
+# @app.post("/api/v1/generate")
+# async def generate_image_mvp(
+#     request: MVPGenerationRequest,
+#     http_request: Request,
+#     current_user: dict = Depends(get_current_user),
+#     _: None = Depends(check_mvp_rate_limit)
+# ):
+#     """
+#     MVP version: Generate a visual asset without authentication
+#     - Simple rate limiting by IP
+#     - Basic image generation
+#     - No user tracking or premium features
+#     """
+#     client_ip = http_request.client.host
+#     request_id = f"mvp_{client_ip}_{int(time.time())}"
+
+#     logger.info(f"[MVP-LoggedIn][{request_id}] Generation request from IP: {client_ip} And User: {current_user['email']}")
+
+#     start_time = time.time()
+    
+#     try:
+#         if request.model and 'pro' in request.model.lower():
+#             model = pro_gemini_model
+#         else:
+#             model = gemini_model
+
+
+#         logger.info(f"[MVP] Starting visual asset generation for User: {current_user['email']}, prompt: '{request.prompt}'")
+#         # Generate the visual asset
+#         image_bytes = await generate_visual_asset_mvp(request, model, client_ip)
+        
+#         # Calculate generation time
+#         generation_time = int((time.time() - start_time) * 1000)
+        
+#         logger.info(f"[MVP][{request_id}] Generation completed successfully in {generation_time}ms")
+        
+#         # Return the image
+#         return StreamingResponse(
+#             io.BytesIO(image_bytes),
+#             media_type="image/png",
+#             headers={
+#                 "Content-Disposition": "inline; filename=generated-image.png",
+#                 "Cache-Control": "no-cache",
+#                 "X-Request-ID": request_id,
+#                 "X-Generation-Time": str(generation_time),
+#                 "X-Mode": "MVP"
+#             }
+#         )
+        
+#     except HTTPException as e:
+#         logger.error(f"[MVP][{request_id}] HTTP error: {e.status_code} - {e.detail}")
+#         raise
+#     except Exception as e:
+#         logger.error(f"[MVP][{request_id}] Unexpected error: {str(e)}")
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"Unexpected error during image generation: {str(e)}"
+#         )
 
 
 # ==================== EXISTING PREMIUM ENDPOINTS (UNCHANGED) ====================
@@ -1105,6 +1203,94 @@ async def get_brand_kit(current_user: dict = Depends(get_current_user)):
             status_code=500,
             detail="Failed to get brand kit"
         )
+
+# Add this entire function to index.py
+
+@app.post("/users/history/{generation_id}/edit", response_model=GenerationResponse)
+async def edit_generation(
+    generation_id: str,
+    request: EditRequest,
+    http_request: Request,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Edits an existing generation by modifying its HTML blueprint and creating a new version.
+    """
+    client_ip = http_request.client.host
+    request_id = f"{current_user['id']}_{int(time.time())}_edit"
+    logger.info(f"[{request_id}] Edit request for generation {generation_id}")
+    start_time = time.time()
+
+    auth_middleware = get_auth_middleware()
+    generation_service = GenerationService(auth_middleware.supabase)
+
+    try:
+        # 1. Fetch the original/parent generation record
+        parent_generation = await generation_service.get_generation_by_id(generation_id, current_user["id"])
+        if not parent_generation:
+            raise HTTPException(status_code=404, detail="Generation not found.")
+        
+        preset_data = get_preset_dimensions(parent_generation['size_preset'])
+        parent_width = preset_data['width']
+        parent_height = preset_data['height']
+
+        # 2. Create the specialized "edit" prompt
+        edit_prompt_for_llm = HTML_EDIT_PROMPT.format(
+            original_html=parent_generation['generated_html'],
+            edit_prompt=request.edit_prompt
+        )
+
+        # 3. Call the LLM to get the MODIFIED HTML
+        model_to_use = pro_gemini_model if 'pro' in parent_generation['model_used'] else gemini_model
+        modified_html_content = await generate_html_with_gemini(model_to_use, edit_prompt_for_llm, client_ip)
+        cleaned_modified_html = clean_html_response(modified_html_content)
+
+        # 4. Render the new HTML to a new image
+        modified_image_bytes = await render_html_to_image(
+            cleaned_modified_html, parent_width, parent_height, client_ip
+        )
+
+        # 5. Upload the new image to Storage
+        file_path = f"{current_user['id']}/{uuid.uuid4()}.png"
+        auth_middleware.supabase.storage.from_("generations").upload(
+            file=modified_image_bytes,
+            path=file_path,
+            file_options={"content-type": "image/png"}
+        )
+        new_image_url = auth_middleware.supabase.storage.from_("generations").get_public_url(file_path)
+
+        # 6. Save a NEW entry to the generations table
+        generation_time = int((time.time() - start_time) * 1000)
+        new_generation_data = GenerationCreate(
+            user_id=current_user["id"],
+            design_thread_id=parent_generation['design_thread_id'],
+            parent_id=parent_generation['id'],
+            prompt=request.edit_prompt,
+            prompt_type='edit',
+            generated_html=cleaned_modified_html,
+            image_url=new_image_url,
+            model_used=parent_generation['model_used'],
+            theme=parent_generation['theme'],
+            size_preset=parent_generation['size_preset'],
+            generation_time_ms=generation_time
+        )
+
+        new_record = await generation_service.create_generation(new_generation_data)
+        if not new_record:
+            raise HTTPException(status_code=500, detail="Failed to save edited record.")
+
+        logger.info(f"[{request_id}] Edit successful. New generation ID: {new_record['id']}")
+
+        # 7. Return the new generation record
+        pydantic_record = GenerationResponse.from_orm(new_record)
+        return jsonable_encoder(pydantic_record)
+
+    except HTTPException as e:
+        logger.error(f"[{request_id}] HTTP error during edit: {e.detail}")
+        raise
+    except Exception as e:
+        logger.error(f"[{request_id}] Unexpected error during edit: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An unexpected error occurred during the edit.")
 
 if __name__ == "__main__":
     import uvicorn
