@@ -73,7 +73,9 @@ class AuthMiddleware:
                 "email": user_response.data["email"],
                 "subscription_tier": user_response.data["subscription_tier"],
                 "usage_count": user_response.data["usage_count"],
-                "usage_reset_date": user_response.data["usage_reset_date"]
+                "usage_reset_date": user_response.data["usage_reset_date"],
+                "pro_usage_count": user_response.data.get("pro_usage_count", 0),
+                "edit_usage_count": user_response.data.get("edit_usage_count", 0)
             }
             
         except jwt.ExpiredSignatureError:

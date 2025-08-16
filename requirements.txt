@@ -14,3 +14,4 @@ cairosvg>=2.5.0
 stripe>=12.2.0
 slowapi
 httpx
+paddle-python-sdk
