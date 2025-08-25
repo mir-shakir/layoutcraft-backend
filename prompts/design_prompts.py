@@ -7,6 +7,7 @@ COMMON_INSTRUCTIONS = """
 - All CSS in single `<style>` tag in head
 - Use `.container` class with exact user-specified dimensions, no shadows
 - Font Awesome CDN: "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.0/css/all.min.css"
+- use a combinatioin of custom css and  tailwind to make it less verbose "https://cdn.tailwindcss.com".
 - Google Fonts imports in head as needed
 
 **REQUIREMENTS:**
