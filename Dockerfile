@@ -1,7 +1,7 @@
 # --- Stage 1: Base Image ---
 # Use a slim, official Python image for a smaller final container size.
 # Using a specific version (e.g., 3.12) is better for production than `latest`.
-FROM python:3.12-slim
+FROM python:3.12-slim-bullseye
 
 # --- Environment Variables ---
 # Set environment variables to prevent Python from writing .pyc files and to buffer output.
