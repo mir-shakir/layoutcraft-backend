@@ -25,13 +25,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # --- Install Playwright Browsers & System Dependencies ---
 # First, update the package lists to ensure we can find all dependencies.
 RUN apt-get update \
-    # Install essential build tools that are missing from the slim image
     && apt-get install -y --no-install-recommends \
     gnupg \
-    # Clean up the apt cache to keep the image size small
     && rm -rf /var/lib/apt/lists/* \
-    && echo "Cache bust: $(date)"
-RUN playwright install --with-deps
+    && apt-get update \
+    && playwright install-deps \
+    && playwright install
 
 # --- Copy Application Code ---
 # Copy the rest of your application's source code into the container.
