@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # This is the most critical step for a server deployment.
 # `--with-deps` installs the necessary system libraries (like fonts, graphics libs, etc.)
 # that the headless Chromium browser needs to run correctly on a lean Linux server.
+RUN apt-get update
 RUN playwright install --with-deps
 
 # --- Copy Application Code ---
