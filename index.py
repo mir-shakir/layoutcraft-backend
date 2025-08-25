@@ -320,7 +320,7 @@ async def generate_html_with_gemini(model, prompt: str, client_ip: str) -> str:
         logger.error(f"Error in HTML generation for IP {client_ip}: {str(e)}: Trying to reinitialize model.")
     
     try:
-        model = initialize_gemini(model.model_name)
+        model = initialize_gemini(PRO_GEMINI_MODEL)
         response = await asyncio.wait_for(
             asyncio.to_thread(model.generate_content, prompt),
             timeout=GENERATION_TIMEOUT
