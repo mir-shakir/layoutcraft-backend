@@ -30,6 +30,7 @@ RUN apt-get update \
     gnupg \
     # Clean up the apt cache to keep the image size small
     && rm -rf /var/lib/apt/lists/*
+    && echo "Cache bust: $(date)"
 RUN playwright install --with-deps
 
 # --- Copy Application Code ---
