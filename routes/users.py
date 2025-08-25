@@ -255,3 +255,36 @@ async def update_user_preferences(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update user preferences"
         )
+
+# Add this new function to routes/users.py
+
+@router.get("/history/{generation_id}", response_model=GenerationResponse)
+async def get_single_generation(
+    generation_id: str,
+    current_user: dict = Depends(get_current_user),
+    auth_middleware: AuthMiddleware = Depends(get_auth_middleware)
+):
+    """
+    Get a single generation by its ID for the current user.
+    """
+    try:
+        # Use the GenerationService to fetch the data
+        # In a future step, you can create a dedicated function in your service for this
+        response = auth_middleware.supabase.table("generations").select(
+            "*" # Select all columns
+        ).eq("id", generation_id).eq("user_id", current_user["id"]).single().execute()
+
+        if not response.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Generation not found or you do not have permission to view it."
+            )
+
+        return GenerationResponse.from_orm(response.data)
+
+    except Exception as e:
+        logger.error(f"Error fetching single generation {generation_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch generation details."
+        )
