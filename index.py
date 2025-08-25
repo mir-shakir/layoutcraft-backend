@@ -283,14 +283,13 @@ async def generate_html_with_gemini(model_name:str, prompt: str, client_ip: str)
             ),
             timeout=GENERATION_TIMEOUT
         )
-        logger.info(f"Raw Gemini response from vertex: {response}")
+        logger.info(f"Raw Gemini response from vertex: {response[10:]}")
         if response and response.candidates:
             candidate = response.candidates[0]
             if candidate.content and hasattr(candidate.content, 'parts'):
                 parts = candidate.content.parts
                 if parts:
                     text_output = "".join(p.text for p in parts if hasattr(p, 'text'))
-                    logger.info(f"Generated text: {text_output}")
                     return text_output
 
         logger.error("No text parts found in Gemini response")
@@ -807,7 +806,6 @@ async def generate_image_authenticated( # Renamed for clarity
             request.prompt, prompt_template, preset_context, width, height
         )
         html_content = await generate_html_with_gemini(model_to_use, full_prompt, client_ip)
-        logger.info(f"[{html_content}] Generated HTML content successfully.")
         cleaned_html = clean_html_response(html_content)
 
         # --- 3. Render Image (Existing Logic) ---
