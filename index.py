@@ -283,7 +283,7 @@ async def generate_html_with_gemini(model_name:str, prompt: str, client_ip: str)
             ),
             timeout=GENERATION_TIMEOUT
         )
-        logger.info(f"Raw Gemini response from vertex: {response[10:]}")
+        logger.info(f"Raw Gemini response: {response}")
         if response and response.candidates:
             candidate = response.candidates[0]
             if candidate.content and hasattr(candidate.content, 'parts'):
