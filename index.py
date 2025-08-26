@@ -469,7 +469,7 @@ async def render_html_to_image(html_content: str, width: int, height: int, clien
         logger.error(f"Error in HTML rendering for IP {client_ip}: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Error rendering image: {str(e)}"
+            detail=f"Failed to generate design. Please try again"
         )
 # async def generate_visual_asset(
 #     request: GenerationRequest,
