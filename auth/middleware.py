@@ -108,7 +108,7 @@ class AuthMiddleware:
         """
         Create JWT access token (for custom auth flows)
         """
-        expire = datetime.utcnow() + timedelta(hours=24)
+        expire = datetime.utcnow() + timedelta(hours=72)
         payload = {
             "sub": user_id,
             "email": email,
