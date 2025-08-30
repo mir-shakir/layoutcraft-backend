@@ -12,4 +12,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping the service
-        run: curl -s "https://layoutcraft-backend.onrender.com/" || exit 0
+        run: curl -s "https://layoutcraft-backend.onrender.com/api/presets" || exit 0
