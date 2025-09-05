@@ -10,6 +10,8 @@ from auth.dependencies import get_current_user, RequireProTier
 from auth.middleware import auth_middleware
 from models.user import UserResponse
 from models.generation import GenerationResponse
+from auth.middleware import get_auth_middleware, AuthMiddleware
+
 
 router = APIRouter(prefix="/users", tags=["Users"])
 logger = logging.getLogger(__name__)
@@ -101,30 +103,33 @@ async def get_usage_stats(current_user: dict = Depends(get_current_user)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get usage statistics"
         )
-
+# In routes/users.py
 @router.get("/history", response_model=List[GenerationResponse])
 async def get_generation_history(
     current_user: dict = Depends(get_current_user),
-    limit: int = Query(default=10, le=100),
+    auth_middleware: AuthMiddleware = Depends(get_auth_middleware), # <-- ADD THIS DEPENDENCY
+    limit: int = Query(default=20, le=100),
     offset: int = Query(default=0, ge=0)
 ):
     """
     Get user generation history
     """
     try:
-        response = auth_middleware.supabase.table("generation_history").select(
-            "id, prompt, model_used, width, height, image_url, generation_time_ms, created_at"
+        # Now auth_middleware is guaranteed to be available
+        response = auth_middleware.supabase.table("generations").select(
+            "id, prompt, prompt_type, image_url, model_used, theme, size_preset, created_at, user_id, design_thread_id, parent_id"
         ).eq("user_id", current_user["id"]).order(
             "created_at", desc=True
         ).limit(limit).offset(offset).execute()
-        
+
         if not response.data:
             return []
-        
-        return [GenerationResponse(**item) for item in response.data]
-        
+
+        # Use from_orm as it's the correct Pydantic V2 syntax
+        return [GenerationResponse.from_orm(item) for item in response.data]
+
     except Exception as e:
-        logger.error(f"Get generation history error: {str(e)}")
+        logger.error(f"Get generation history error: {str(e)}", exc_info=True) # Add exc_info for better logging
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get generation history"
@@ -249,4 +254,37 @@ async def update_user_preferences(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update user preferences"
+        )
+
+# Add this new function to routes/users.py
+
+@router.get("/history/{generation_id}", response_model=GenerationResponse)
+async def get_single_generation(
+    generation_id: str,
+    current_user: dict = Depends(get_current_user),
+    auth_middleware: AuthMiddleware = Depends(get_auth_middleware)
+):
+    """
+    Get a single generation by its ID for the current user.
+    """
+    try:
+        # Use the GenerationService to fetch the data
+        # In a future step, you can create a dedicated function in your service for this
+        response = auth_middleware.supabase.table("generations").select(
+            "*" # Select all columns
+        ).eq("id", generation_id).eq("user_id", current_user["id"]).single().execute()
+
+        if not response.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Generation not found or you do not have permission to view it."
+            )
+
+        return GenerationResponse.from_orm(response.data)
+
+    except Exception as e:
+        logger.error(f"Error fetching single generation {generation_id}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch generation details."
         )

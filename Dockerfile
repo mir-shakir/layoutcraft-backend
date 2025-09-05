@@ -1,7 +1,7 @@
 # --- Stage 1: Base Image ---
 # Use a slim, official Python image for a smaller final container size.
 # Using a specific version (e.g., 3.12) is better for production than `latest`.
-FROM python:3.12-slim
+FROM python:3.12-slim-bullseye
 
 # --- Environment Variables ---
 # Set environment variables to prevent Python from writing .pyc files and to buffer output.
@@ -22,7 +22,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # This is the most critical step for a server deployment.
 # `--with-deps` installs the necessary system libraries (like fonts, graphics libs, etc.)
 # that the headless Chromium browser needs to run correctly on a lean Linux server.
-RUN playwright install --with-deps
+# --- Install Playwright Browsers & System Dependencies ---
+# First, update the package lists to ensure we can find all dependencies.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get update \
+    && playwright install-deps \
+    && playwright install
 
 # --- Copy Application Code ---
 # Copy the rest of your application's source code into the container.

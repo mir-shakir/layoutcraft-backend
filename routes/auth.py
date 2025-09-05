@@ -108,13 +108,13 @@ async def register(request: RegisterRequest):
             )
         
         # Handle email confirmation
-        if not auth_response.user.email_confirmed_at:
-            logger.info(f"User registered but needs email confirmation: {request.email}")
-            return RegistrationPendingResponse(
-                message="Registration successful. Please check your email to confirm your account.",
-                user_id=auth_response.user.id,
-                email_confirmation_required=True
-            )
+        # if not auth_response.user.email_confirmed_at:
+        #     logger.info(f"User registered but needs email confirmation: {request.email}")
+        #     return RegistrationPendingResponse(
+        #         message="Registration successful. Please check your email to confirm your account.",
+        #         user_id=auth_response.user.id,
+        #         email_confirmation_required=True
+        #     )
         
         # Create access token for confirmed users
         access_token = auth_middleware.create_access_token(

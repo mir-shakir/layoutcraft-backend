@@ -112,6 +112,52 @@ class UserService:
             logger.error(f"Error updating usage for user {user_id}: {str(e)}")
             return False
     
+
+
+    async def update_usage(self,user_data: Dict[str, Any],usage_increment: int = 1, pro_increment: int = 0, edit_increment: int = 0) -> bool:
+        """
+        Increment user usage count with automatic reset handling
+        """
+        try:
+            # Get current user data
+
+            current_usage = user_data["usage_count"]
+            user_id = user_data["id"]
+            reset_date = datetime.fromisoformat(user_data["usage_reset_date"].replace("Z", "+00:00"))
+            
+            # Check if we need to reset usage
+            now = datetime.now().replace(tzinfo=reset_date.tzinfo)
+            if now >= reset_date:
+                # Reset usage for new period
+                new_usage = usage_increment
+                new_reset_date = self._get_next_reset_date()
+                logger.info(f"Resetting usage for user {user_id}")
+            else:
+                # Increment existing usage
+                new_usage = current_usage + usage_increment
+                new_reset_date = reset_date
+
+            new_pro_usage = user_data.get("pro_usage_count", 0) + pro_increment
+            new_edit_usage = user_data.get("edit_usage_count", 0) + edit_increment
+            # Update the database
+            update_data = {
+                "usage_count": new_usage,
+                "usage_reset_date": new_reset_date.isoformat(),
+                "pro_usage_count": new_pro_usage,
+                "edit_usage_count": new_edit_usage
+            }
+            
+            response = self.supabase.table("user_profiles").update(update_data).eq("id", user_id).execute()
+            
+            if response.data:
+                logger.info(f"Updated usage for user {user_data.get('id')}: {new_usage}")
+                return True
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error updating usage for user {user_data.get('id')}: {str(e)}")
+            return False
+    
     async def get_user_statistics(self, user_id: str) -> Dict[str, Any]:
         """
         Get comprehensive user statistics

@@ -1,7 +1,7 @@
 fastapi
 uvicorn[standard]
 python-dotenv
-google-generativeai
+google-genai
 playwright
 supabase
 pydantic
@@ -14,3 +14,4 @@ cairosvg>=2.5.0
 stripe>=12.2.0
 slowapi
 httpx
+paddle-python-sdk

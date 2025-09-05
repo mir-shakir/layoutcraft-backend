@@ -5,7 +5,8 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 import logging
 from supabase import Client
-from models.generation import GenerationCreate, GenerationHistory
+from models.generation import GenerationCreate
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,13 @@ class GenerationService:
             data = generation_data.dict()
             data["created_at"] = datetime.now().isoformat()
             
-            response = self.supabase.table("generation_history").insert(data).execute()
+            # --- FIX: Convert UUIDs to strings before sending to DB ---
+            for key, value in data.items():
+                if isinstance(value, uuid.UUID):
+                    data[key] = str(value)
+            
+            # --- FIX: Ensure you are using the new table name 'generations' ---
+            response = self.supabase.table("generations").insert(data).execute()
             
             if response.data:
                 logger.info(f"Saved generation for user {generation_data.user_id}")
@@ -30,7 +37,7 @@ class GenerationService:
             return None
             
         except Exception as e:
-            logger.error(f"Error creating generation: {str(e)}")
+            logger.error(f"Error creating generation: {str(e)}", exc_info=True) # Added exc_info for better logging
             return None
     
     async def get_user_generations(self, user_id: str, limit: int = 10, offset: int = 0) -> List[Dict[str, Any]]:
@@ -38,7 +45,7 @@ class GenerationService:
         Get user's generation history with pagination
         """
         try:
-            response = self.supabase.table("generation_history").select(
+            response = self.supabase.table("generations").select(
                 "id, prompt, model_used, width, height, image_url, generation_time_ms, created_at"
             ).eq("user_id", user_id).order("created_at", desc=True).limit(limit).offset(offset).execute()
             
@@ -53,7 +60,7 @@ class GenerationService:
         Get specific generation by ID (with user ownership check)
         """
         try:
-            response = self.supabase.table("generation_history").select("*").eq("id", generation_id).eq("user_id", user_id).single().execute()
+            response = self.supabase.table("generations").select("*").eq("id", generation_id).eq("user_id", user_id).single().execute()
             return response.data
         except Exception as e:
             logger.error(f"Error getting generation {generation_id}: {str(e)}")
@@ -64,7 +71,7 @@ class GenerationService:
         Delete a specific generation (with user ownership check)
         """
         try:
-            response = self.supabase.table("generation_history").delete().eq("id", generation_id).eq("user_id", user_id).execute()
+            response = self.supabase.table("generations").delete().eq("id", generation_id).eq("user_id", user_id).execute()
             
             if response.data:
                 logger.info(f"Deleted generation {generation_id} for user {user_id}")
@@ -81,7 +88,7 @@ class GenerationService:
         """
         try:
             # Get all generations for the user
-            all_generations = self.supabase.table("generation_history").select("*").eq("user_id", user_id).execute()
+            all_generations = self.supabase.table("generations").select("*").eq("user_id", user_id).execute()
             
             if not all_generations.data:
                 return {
@@ -132,7 +139,7 @@ class GenerationService:
         """
         try:
             # Get all prompts and count frequency
-            response = self.supabase.table("generation_history").select("prompt").execute()
+            response = self.supabase.table("generations").select("prompt").execute()
             
             if not response.data:
                 return []
@@ -163,7 +170,7 @@ class GenerationService:
             cutoff_date = datetime.now() - timedelta(days=days_old)
             
             # Only clean up generations from free users
-            response = self.supabase.table("generation_history").delete().lt("created_at", cutoff_date.isoformat()).execute()
+            response = self.supabase.table("generations").delete().lt("created_at", cutoff_date.isoformat()).execute()
             
             deleted_count = len(response.data) if response.data else 0
             logger.info(f"Cleaned up {deleted_count} old generations")

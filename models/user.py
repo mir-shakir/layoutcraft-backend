@@ -1,7 +1,7 @@
 """
 User model for LayoutCraft
 """
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr,Field
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
@@ -40,3 +40,6 @@ class UserResponse(BaseModel):
     usage_count: int
     usage_reset_date: datetime
     created_at: datetime
+
+class EditRequest(BaseModel):
+    edit_prompt: str = Field(..., description="The user's instruction for what to change.")
