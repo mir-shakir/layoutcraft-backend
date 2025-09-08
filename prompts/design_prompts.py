@@ -5,13 +5,16 @@ COMMON_INSTRUCTIONS = """
 **OUTPUT FORMAT:**
 - Raw HTML only: `<!DOCTYPE html>` to `</html>` - NO explanations/markdown
 - All CSS in single `<style>` tag in head
-- Use `.container` class with exact user-specified dimensions, no shadows
+- Use containers with exact dimensions specified (width x height)
 - Font Awesome CDN: "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.0/css/all.min.css"
-- use a combinatioin of custom css and  tailwind to make it less verbose "https://cdn.tailwindcss.com".
+- use a combination of custom css and  tailwind to make it less verbose "https://cdn.tailwindcss.com".
 - Google Fonts imports in head as needed
+- You MUST write standard, browser-compatible CSS
+Strict Requirements: "{preset_context}"
 
 **REQUIREMENTS:**
-- STRICTLY follow ALL user specifications (colors, style, layout, dimensions, text preferences)
+- STRICTLY follow ALL user specifications (colors, style, layout, text preferences)
+- Understand the purpose/audience of the design and user intent
 - Award-winning, portfolio-level design quality
 - Modern aesthetics with purposeful elements
 - CSS Grid/Flexbox, proper color theory
@@ -110,12 +113,26 @@ Context: This html is converted into png using a headless browser to create a de
 1. MINIMAL CHANGES: Preserve original design/layout/styles. Only modify what's absolutely necessary.
 2. CODE-ONLY OUTPUT: Complete raw HTML from `<!DOCTYPE html>` to `</html>`. NO explanations/markdown.
 3. VALID & SELF-CONTAINED: All styles in single `<style>` tag.
+4. Only Make changes to the following size_presets and keeping the rest unaffected. if there are common elements which need to be changed, change them in a way that it does not affect the other size_presets.
+Keep the existing class name for each preset container same as the preset name for easy identification.
+**SIZE PRESETS** : {size_preset_context}
 
 **ORIGINAL HTML:**
 ```html
 {original_html}
 ```
 **EDIT REQUEST:** "{edit_prompt}"
+"""
+
+SIZE_PRESET_CONTEXT = """
+create a containers with the exact dimentions specified. Each container should be an adaptation of the original design to fit the new dimensions while maintaining visual balance and hierarchy. 
+Critical Requirements:
+- Exact dimensions: Use specified width and height for each container.
+- Add a class name same as the preset name to each container for easy identification.
+- Maintain design integrity: Ensure the core design elements and aesthetics are preserved. Keep the text, colors, icons and overall style consistent across all presets.
+- The text should strictly remain same across all containers unless specified otherwise.
+- Responsive layout: Ensure the design adapts well to the new dimensions without losing its appeal.
+Create exactly one container for all the below presets:
 """
 
 def get_template_by_name(name: str) -> dict:

@@ -4,15 +4,16 @@ import time
 import logging
 import random
 from xmlrpc import client
-from prompts.design_prompts import DESIGN_PROMPTS,HTML_EDIT_PROMPT
+from prompts.design_prompts import DESIGN_PROMPTS,HTML_EDIT_PROMPT, SIZE_PRESET_CONTEXT
 from config.dimension_presets import (
     get_preset_dimensions, 
     get_default_preset, 
     create_dynamic_prompt_context,
     validate_preset_name,
+    get_multiple_presets_with_context,
     DEFAULT_PRESET
 )
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set,Any
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -48,6 +49,7 @@ import uuid
 from fastapi.responses import JSONResponse 
 from collections import defaultdict
 from config.tier_config import get_tier_features # Add this import
+from config.decorators import retry_on_ssLError
 
 
 # Load environment variables
@@ -96,6 +98,7 @@ PRO_GEMINI_MODEL = os.getenv("PRO_GEMINI_MODEL", "gemini-2.5-pro")  # Default to
 GENERATION_TIMEOUT = int(os.getenv("GENERATION_TIMEOUT", "180"))  # 2 minutes default
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "10"))  # requests per minute
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))  # seconds
+ANONYMOUS_USER_ID = os.getenv("ANONYMOUS_USER_ID","0e699219-d5ae-4179-966f-f30b24d82e8a")  # Fallback anonymous user ID
 
 # MVP Rate limiting configuration
 MVP_RATE_LIMIT_REQUESTS = int(os.getenv("MVP_RATE_LIMIT_REQUESTS", "5"))  # 5 requests per minute for MVP
@@ -133,6 +136,16 @@ class MVPGenerationRequest(BaseModel):
     model:str = Field(default=None, description="Override default model for this request (MVP)")
     theme:str = Field(default="auto", description="Theme for the image generation (MVP)")
     size_preset: Optional[str] = Field(default=None, description="Predefined size preset (e.g., 'blog_header', 'social_square')")
+
+class GenerateMultipleRequest(BaseModel):
+    prompt: str = Field(..., description="User's prompt for image generation")
+    theme:str = Field(default="auto", description="Theme for the image generation (MVP)")
+    size_presets : List[str] = Field(default=["blog_header"], description="List of predefined size presets")
+
+class RefineDesignRequest(BaseModel):
+    generation_id: str = Field(..., description="ID of the generation to refine")
+    edit_prompt: str = Field(..., description="User's instruction for what to change")
+    size_presets: List[str] = Field(default=["blog_header"], description="List of predefined size presets")
 
 class FeedbackData(BaseModel):
     email: EmailStr
@@ -240,6 +253,25 @@ def get_design_prompt_template(theme: str) -> dict:
     logger.warning(f"No design prompt found for theme '{theme}', using default")
     return get_next_prompt_template()  # Fallback to random template if not found
 
+def create_refine_prompt(original_html: str, edit_prompt: str, size_preset_context: str) -> str:
+    """Create the full edit prompt for refining existing HTML."""
+    full_prompt = HTML_EDIT_PROMPT.format(
+        original_html=original_html,
+        edit_prompt=edit_prompt,
+        size_preset_context=size_preset_context
+    )
+    return full_prompt
+def create_full_generation_prompt(user_prompt: str, size_presets: List[str], theme: str) -> str:
+    """
+        This function is an adaptation of create_generation_prompt_with_template to do all the promt building in one place.
+        include multiple size presets in the prmpt with dimet
+    """
+    full_preset_prompt = SIZE_PRESET_CONTEXT + get_multiple_presets_with_context(size_presets)
+    prompt_template = get_design_prompt_template(theme)
+    full_prompt = prompt_template["prompt"].format(user_prompt=user_prompt,preset_context=full_preset_prompt)
+    return full_prompt
+        
+
 def create_generation_prompt_with_template(user_prompt: str, template: dict, preset_context: str = "", width: int = 1200, height: int = 630) -> str:
     """Create the system prompt using selected template and optional preset context."""
     base_prompt = template["prompt"].format(user_prompt=user_prompt)
@@ -269,7 +301,6 @@ def create_generation_prompt_with_template(user_prompt: str, template: dict, pre
 
 async def generate_html_with_gemini(model_name:str, prompt: str, client_ip: str) -> str:
     """Generate HTML using Gemini AI."""
-    start_time = time.time()
     logger.info(f"Starting HTML generation for IP: {client_ip}")
     
     try:
@@ -283,7 +314,6 @@ async def generate_html_with_gemini(model_name:str, prompt: str, client_ip: str)
             ),
             timeout=GENERATION_TIMEOUT
         )
-        logger.info(f"Raw Gemini response: {response}")
         if response and response.candidates:
             candidate = response.candidates[0]
             if candidate.content and hasattr(candidate.content, 'parts'):
@@ -380,45 +410,62 @@ def clean_html_response(html_content: str) -> str:
     
     return html_content
 
-# async def render_html_to_image(html_content: str, width: int, height: int, client_ip: str) -> bytes:
-#     """Render HTML to PNG image using Playwright."""
-#     start_time = time.time()
-#     logger.info(f"Starting HTML rendering to image ({width}x{height}) for IP: {client_ip}")
+
     
-#     try:
-#         async with async_playwright() as p:
-#             browser = await p.chromium.launch(headless=True)
-#             page = await browser.new_page()
+async def get_multiple_images_from_html(
+    html_content: str, 
+    size_presets: List[str]
+) -> List[Dict[str, Any]]:
+    output_images = []
+    
+    try:
+        async with async_playwright() as p:
+            # Launch one browser instance for all operations
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
             
-#             # Set viewport size to match requested dimensions
-#             await page.set_viewport_size({"width": width, "height": height})
+            # Set a large enough viewport to ensure all elements are rendered
+            await page.set_viewport_size({"width": 1920, "height": 1080}) 
             
-#             # Set HTML content
-#             await page.set_content(html_content, wait_until="networkidle")
+            # Load the HTML content once
+            await page.set_content(html_content, wait_until="networkidle")
+
+            # Iterate through the requested presets and take a screenshot of each
+            for preset_name in size_presets:
+                try:
+                    # Use the preset name as the class selector
+                    container_selector = f".{preset_name}"
+                    container = page.locator(container_selector).first
+                    
+                    # Wait for the element to be visible to ensure it has rendered
+                    await container.wait_for(timeout=5000) 
+                    
+                    logger.info(f"Capturing screenshot for preset: '{preset_name}'")
+                    
+                    screenshot_bytes = await container.screenshot(type="png")
+                    
+                    output_images.append({
+                        "size_preset": preset_name,
+                        "image_bytes": screenshot_bytes
+                    })
+                except Exception as e:
+                    logger.error(f"Failed to capture screenshot for preset '{preset_name}': {e}")
+                    # Continue to the next preset even if one fails
+                    continue
+
+            await browser.close()
+            # if no images were captured, log a warning and throw an error
+            if not output_images:
+                logger.error("No images were captured from the HTML content.")
+                raise HTTPException(status_code=500, detail="Image Generation Failed")
             
-#             # Take screenshot
-#             screenshot_bytes = await page.screenshot(
-#                 type="png",
-#                 full_page=False,
-#                 clip={"x": 0, "y": 0, "width": width, "height": height}
-#             )
+            logger.info(f"Successfully captured {len(output_images)} images from HTML.")
+            return output_images
             
-#             await browser.close()
-            
-#             render_time = time.time() - start_time
-#             image_size = len(screenshot_bytes)
-#             logger.info(f"Image rendered in {render_time:.2f}s, size: {image_size} bytes for IP: {client_ip}")
-            
-#             return screenshot_bytes
-            
-#     except Exception as e:
-#         logger.error(f"Error in HTML rendering for IP {client_ip}: {str(e)}")
-#         raise HTTPException(
-#             status_code=500,
-#             detail=f"Error rendering image: {str(e)}"
-#         )
-# This is inside your ImageCreationService class in index.py
-# This is inside your ImageCreationService class in index.py
+    except Exception as e:
+        logger.error(f"An error occurred during multi-image rendering: {e}", exc_info=True)
+        # Re-raise the exception to be handled by the main API endpoint
+        raise
 
 async def render_html_to_image(html_content: str, width: int, height: int, client_ip: str) -> bytes:
     """Render HTML to PNG image using Playwright with a fallback mechanism."""
@@ -471,30 +518,6 @@ async def render_html_to_image(html_content: str, width: int, height: int, clien
             status_code=500,
             detail=f"Failed to generate design. Please try again"
         )
-# async def generate_visual_asset(
-#     request: GenerationRequest,
-#     model,
-#     client_ip: str
-# ) -> bytes:
-#     """Main logic for generating visual assets."""
-#     logger.info(f"Starting visual asset generation for IP: {client_ip}, prompt: '{request.prompt}...'")
-    
-#     # Get random/sequential prompt template
-#     prompt_template = get_next_prompt_template()
-#     full_prompt = create_generation_prompt_with_template(request.prompt, prompt_template, "", request.width, request.height)
-#     logger.info(f"Using prompt template: {prompt_template['name']}")
-    
-#     # Generate HTML with Gemini
-#     html_content = await generate_html_with_gemini(model, full_prompt, client_ip)
-    
-#     # Clean HTML response
-#     cleaned_html = clean_html_response(html_content)
-    
-#     # Render HTML to image
-#     image_bytes = await render_html_to_image(cleaned_html, request.width, request.height, client_ip)
-    
-#     logger.info(f"Visual asset generation completed successfully for IP: {client_ip}")
-#     return image_bytes
 
 def resolve_dimensions_from_preset(request: MVPGenerationRequest) -> tuple[int, int, str]:
     """
@@ -531,40 +554,6 @@ def resolve_dimensions_from_preset(request: MVPGenerationRequest) -> tuple[int, 
         logger.info(f"Using default preset '{DEFAULT_PRESET}': {width}x{height}")
         return width, height, preset_context
 
-
-# MVP version of generate_visual_asset (simplified)
-# async def generate_visual_asset_mvp(
-#     request: MVPGenerationRequest,
-#     model,
-#     client_ip: str,
-# ) -> bytes:
-#     """Simplified logic for generating visual assets in MVP mode."""
-    
-#     # Resolve dimensions from preset or use provided dimensions
-#     width, height, preset_context = resolve_dimensions_from_preset(request)
-#     logger.info(f"[MVP] Resolved dimensions: {width}x{height}, preset context: '{preset_context}'")
-    
-#     # Get design prompt template based on theme
-#     prompt_template = get_design_prompt_template(request.theme)
-    
-#     # Create full prompt with preset context and dimensions
-#     full_prompt = create_generation_prompt_with_template(request.prompt, prompt_template, preset_context, width, height)
-#     logger.info(f"[MVP] Using prompt template: {prompt_template['name']}, dimensions: {width}x{height}, prompt length: {len(full_prompt)} characters")  # Log first 100 chars for brevity
-
-#     # Generate HTML with Gemini
-#     html_content = await generate_html_with_gemini(model, full_prompt, client_ip)
-#     logger.debug(f"[MVP] Generated HTML content : {html_content} ")
-    
-#     logger.info(f"[MVP] HTML generation completed for IP: {client_ip}, length: {len(html_content)} characters")
-#     # Clean HTML response
-#     cleaned_html = clean_html_response(html_content)
-    
-#     # Render HTML to image using resolved dimensions
-#     image_bytes = await render_html_to_image(cleaned_html, width, height, client_ip)
-    
-#     logger.info(f"[MVP] Visual asset generation completed successfully for IP: {client_ip}")
-#     return image_bytes
-
 def get_model_for_request(request: GenerationRequest):
     """Get the appropriate model for the request."""
     if request.model:
@@ -581,6 +570,44 @@ def get_model_for_request(request: GenerationRequest):
     else:
         # Use default model
         return gemini_model
+    
+async def upload_image(image_data : Dict[str, Any], current_user_id: str, storage_client) -> Optional[Dict[str, str]]:
+    """Helper function to upload a single image and return its data."""
+    image_bytes = image_data.get("image_bytes")
+    preset_name = image_data.get("size_preset")
+
+    if not image_bytes or not preset_name:
+        return None
+
+
+
+    # Upload the image
+    try:
+        # Upload the image
+        image_url = upload_image_and_get_url(current_user_id, storage_client, image_bytes, preset_name)
+
+        logger.info(f"Successfully uploaded image for preset: {preset_name}")
+        return {
+            "size_preset": preset_name,
+            "image_url": image_url
+        }
+    except Exception as e:
+        logger.error(f"Failed to upload image for preset '{preset_name}'. Reason: {e}", exc_info=True)
+        return None
+    
+@retry_on_ssLError
+def upload_image_and_get_url(current_user_id, storage_client, image_bytes, preset_name):
+    file_path = f"{current_user_id}/{uuid.uuid4()}_{preset_name}.png"
+    storage_client.upload(
+            file=image_bytes,
+            path=file_path,
+            file_options={"content-type": "image/png"}
+        )
+
+        # Get the public URL
+    image_url = storage_client.get_public_url(file_path)
+    return image_url
+
 
 # Initialize Gemini model at startup
 gemini_model = None
@@ -627,20 +654,16 @@ async def get_dimension_presets():
         "timestamp": datetime.now().isoformat()
     }
 
-# ==================== MVP ENDPOINTS ====================
-# No authorization. 1 pro request per ip rest fast model requests
 
-# Replace the existing /api/generate endpoint in index.py
-
-
-@app.post("/api/generate")
+@app.post("/api/generate", response_model=GenerationResponse)
 async def generate_image_anonymous(
-    request: MVPGenerationRequest,
+    request: GenerateMultipleRequest,
     http_request: Request
 ):
     """
     Generates a visual asset for an anonymous user with a strict 3-generation limit.
     """
+    start_time = time.time()
     client_ip = http_request.client.host
     request_id = f"anon_{client_ip}_{int(time.time())}"
     logger.info(f"[Anonymous Generation][{request_id}] Request from IP: {client_ip}")
@@ -653,46 +676,58 @@ async def generate_image_anonymous(
         logger.warning(f"Anonymous limit exceeded for IP: {client_ip}")
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Please sign up to unlock more generations and Pro quality for free."
+            detail="Please sign up to unlock higher quotas and more features.",
         )
-
-    # if 'pro' in (request.model or '').lower():
-    #     raise HTTPException(
-    #         status_code=status.HTTP_403_FORBIDDEN,
-    #         detail="Sign up to use Pro quality generations."
-    #     )
 
     try:
-        # --- 2. Generate Image and Save to Storage (consistent with v1 endpoint) ---
-        if request.model and 'pro' in request.model.lower():
-            model_to_use = PRO_GEMINI_MODEL
-        else:
-            model_to_use = GEMINI_MODEL 
-        # ... (The logic for generating html and rendering the image is the same) ...
-        # ... (You will need to import the necessary functions like resolve_dimensions_from_preset, etc.)
-        width, height, preset_context = resolve_dimensions_from_preset(request)
-        prompt_template = get_design_prompt_template(request.theme)
-        full_prompt = create_generation_prompt_with_template(
-            request.prompt, prompt_template, preset_context, width, height
-        )
+        model_to_use = PRO_GEMINI_MODEL
+        full_prompt = create_full_generation_prompt(request.prompt,request.size_presets,request.theme)
         html_content = await generate_html_with_gemini(model_to_use, full_prompt, client_ip)
         cleaned_html = clean_html_response(html_content)
-        image_bytes = await render_html_to_image(cleaned_html, width, height, client_ip)
+        output_images = await get_multiple_images_from_html(cleaned_html,request.size_presets)
+
+        auth_middleware = get_auth_middleware()
+        storage_client = auth_middleware.supabase.storage.from_("generations")
+        upload_tasks = [upload_image(img, ANONYMOUS_USER_ID, storage_client) for img in output_images]
+        results = await asyncio.gather(*upload_tasks)
+        outputs_for_db = [res for res in results if res is not None]
+        if not outputs_for_db:
+            logger.error(f"[{request_id}] Failed to upload images for anonymous user.")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="We are unable to process your request at this time. Please try again later."
+            )
+
+        generation_time = int((time.time() - start_time) * 1000)
+        #  set first image from json as image_url to be used as thumbnail in frontend
+        image_url = outputs_for_db[0]["image_url"] if outputs_for_db else None
+        generation_data = GenerationCreate(
+            user_id=ANONYMOUS_USER_ID,
+            design_thread_id=uuid.uuid4(),  # New thread for a new generation
+            parent_id=None,                 # No parent for a new generation
+            prompt=request.prompt,
+            prompt_type='creation',
+            generated_html=cleaned_html,
+            model_used=model_to_use,
+            theme=request.theme,
+            generation_time_ms=generation_time,
+            images_json=outputs_for_db,
+            image_url=image_url
+        )
+        generation_service = GenerationService(auth_middleware.supabase)
+        new_generation_record = await generation_service.create_generation(generation_data)
 
         # --- 3. Increment Usage ---
         anonymous_usage_tracker[client_ip] += 1
         remaining = anon_features["total_generations_limit"] - anonymous_usage_tracker[client_ip]
         logger.info(f"Anonymous usage for {client_ip} is now {anonymous_usage_tracker[client_ip]}. {remaining} remaining.")
 
-        # --- 4. Return Image Stream ---
-        # NOTE: We don't save to the DB for anonymous users, we just stream the image.
-        return StreamingResponse(
-            io.BytesIO(image_bytes),
-            media_type="image/png",
-            headers={
-                "Content-Disposition": "inline; filename=generated-image.png",
-                "x-generations-remaining": str(remaining) # Send remaining quota to UI
-            }
+        pydantic_record = GenerationResponse.from_orm(new_generation_record)
+        response_content = jsonable_encoder(pydantic_record)
+        return JSONResponse(
+            status_code=status.HTTP_201_CREATED,
+            content=response_content,
+            headers={"x-generations-remaining": str(remaining)}
         )
 
     except HTTPException as e:
@@ -703,6 +738,89 @@ async def generate_image_anonymous(
             status_code=500,
             detail="An unexpected error occurred during image generation."
         )
+
+
+#  =======================New Authenticated Endpoints ============================
+
+
+@app.post("/api/v1/generate", response_model=GenerationResponse)
+async def generate_image_authenticated( # Renamed for clarity
+    request: GenerateMultipleRequest,
+    http_request: Request,
+    current_user: dict = Depends(get_current_user),
+    _: None = Depends(check_mvp_rate_limit)
+):
+    """
+    Generates a visual asset for an authenticated user, saves it to storage and the database,
+    and returns the full generation record.
+    """
+   
+    client_ip = http_request.client.host
+    request_id = f"{current_user['id']}_{int(time.time())}"
+    logger.info(f"[Authenticated Generation][{request_id}] Request from user: {current_user['email']}")
+    start_time = time.time()
+
+    try:
+        user_profile = current_user
+        if not user_profile:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User profile not found.")
+
+        model_to_use = PRO_GEMINI_MODEL 
+
+        full_prompt = create_full_generation_prompt(request.prompt,request.size_presets,request.theme)
+        logger.info(f"full prommpt : {full_prompt}")
+        html_content = await generate_html_with_gemini(model_to_use, full_prompt, client_ip)
+        cleaned_html = clean_html_response(html_content)
+        output_images = await get_multiple_images_from_html(cleaned_html,request.size_presets)
+
+
+        auth_middleware = get_auth_middleware()
+        storage_client = auth_middleware.supabase.storage.from_("generations")
+        upload_tasks = [upload_image(img, current_user['id'], storage_client) for img in output_images]
+        results = await asyncio.gather(*upload_tasks)
+        outputs_for_db = [res for res in results if res is not None]
+
+        # Save Generation Record to Database ---
+        generation_service = GenerationService(auth_middleware.supabase)
+        generation_time = int((time.time() - start_time) * 1000)
+        image_url = outputs_for_db[0]["image_url"] if outputs_for_db else None
+        generation_data = GenerationCreate(
+            user_id=current_user["id"],
+            design_thread_id=uuid.uuid4(),  # New thread for a new generation
+            parent_id=None,                 # No parent for a new generation
+            prompt=request.prompt,
+            prompt_type='creation',
+            generated_html=cleaned_html,
+            model_used=model_to_use,
+            theme=request.theme,
+            generation_time_ms=generation_time,
+            images_json=outputs_for_db,
+            image_url=image_url
+        )
+
+        new_generation_record = await generation_service.create_generation(generation_data)
+        if not new_generation_record:
+            raise HTTPException(status_code=500, detail="Failed to save generation record.")
+
+        logger.info(f"[{request_id}] Generation saved with ID: {new_generation_record['id']}")
+
+        pydantic_record = GenerationResponse.from_orm(new_generation_record)
+        response_content = jsonable_encoder(pydantic_record)
+        return JSONResponse(
+            status_code=status.HTTP_201_CREATED,
+            content=response_content
+        )
+
+    except HTTPException as e:
+        logger.error(f"[{request_id}] HTTP error: {e.status_code} - {e.detail}")
+        raise
+    except Exception as e:
+        logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error during image generation. Try again later."
+        )
+
 
 @app.post("/api/feedback")
 async def submit_feedback(data: FeedbackData, _: None = Depends(check_mvp_rate_limit)):
@@ -745,115 +863,79 @@ async def submit_feedback(data: FeedbackData, _: None = Depends(check_mvp_rate_l
  
 
 
-#  =======================New Authenticated Endpoints ============================
-
-
-@app.post("/api/v1/generate", response_model=GenerationResponse)
-async def generate_image_authenticated( # Renamed for clarity
-    request: MVPGenerationRequest,
+@app.post("/api/refine", response_model=GenerationResponse)
+async def refine_design(
+    request: RefineDesignRequest,
     http_request: Request,
     current_user: dict = Depends(get_current_user),
     _: None = Depends(check_mvp_rate_limit)
-    # You can add back rate limiting or other dependencies here if needed
 ):
-    """
-    Generates a visual asset for an authenticated user, saves it to storage and the database,
-    and returns the full generation record.
-    """
-   
+    # Implementation for refining the design goes here
     client_ip = http_request.client.host
-    user_service = UserService(get_auth_middleware().supabase)
-    request_id = f"{current_user['id']}_{int(time.time())}"
-    logger.info(f"[Authenticated Generation][{request_id}] Request from user: {current_user['email']}")
     start_time = time.time()
-
     try:
-        # --- 1. NEW: Robust Permissions Check ---
-        user_profile = current_user
-        if not user_profile:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User profile not found.")
-
-        # tier = user_profile.get("subscription_tier", "free")
-        # tier_features = get_tier_features(tier)
-        # usage_count = user_profile.get("usage_count", 0)
-        # pro_usage_count = user_profile.get("pro_usage_count", 0)
-
-        # if usage_count >= tier_features["monthly_generations_limit"]:
-        #     raise HTTPException(
-        #         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-        #         detail=f"You have used all {tier_features['monthly_generations_limit']} of your generations for this month. Please upgrade for more."
-        #     )
-
-        # Check Pro generation request
-        # is_pro_request = 'pro' in (request.model or '').lower()
-        # if is_pro_request and not tier_features["allow_pro_generations"]:
-        #     raise HTTPException(
-        #         status_code=status.HTTP_403_FORBIDDEN,
-        #         detail="Upgrade to Pro to use Pro quality generations."
-        #     )
-        # if is_pro_request and pro_usage_count >= tier_features["monthly_pro_generations_limit"]:
-        #     raise HTTPException(
-        #         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-        #         detail=f"You have used {tier_features['monthly_pro_generations_limit']}  Pro generations for this month. Please upgrade for more."
-        #     )
-        # --- 1. Determine Model ---
-        model_to_use = PRO_GEMINI_MODEL if 'pro' in (request.model or '').lower() else GEMINI_MODEL
-
-        # --- 2. Generate HTML (Existing Logic) ---
-        width, height, preset_context = resolve_dimensions_from_preset(request)
-        prompt_template = get_design_prompt_template(request.theme)
-        full_prompt = create_generation_prompt_with_template(
-            request.prompt, prompt_template, preset_context, width, height
-        )
-        html_content = await generate_html_with_gemini(model_to_use, full_prompt, client_ip)
-        cleaned_html = clean_html_response(html_content)
-
-        # --- 3. Render Image (Existing Logic) ---
-        image_bytes = await render_html_to_image(cleaned_html, width, height, client_ip)
-
-        # --- 4. NEW: Upload Image to Supabase Storage ---
+        if not current_user:
+            raise HTTPException(status_code=404, detail="User profile not found.")
         auth_middleware = get_auth_middleware()
-        file_path = f"{current_user['id']}/{uuid.uuid4()}.png"
-
-        # Use the Supabase client to upload
-        auth_middleware.supabase.storage.from_("generations").upload(
-            file=image_bytes,
-            path=file_path,
-            file_options={"content-type": "image/png"}
-        )
-
-        # Get the public URL for the uploaded image
-        image_url_response = auth_middleware.supabase.storage.from_("generations").get_public_url(file_path)
-        image_url = image_url_response
-
-        # --- 5. NEW: Save Generation Record to Database ---
         generation_service = GenerationService(auth_middleware.supabase)
-        generation_time = int((time.time() - start_time) * 1000)
+        user_service = UserService(auth_middleware.supabase)
+        generation_id = request.generation_id
+        parent_generation = await generation_service.get_generation_by_id(generation_id, current_user["id"])
+        if not parent_generation:
+            raise HTTPException(status_code=404, detail="Generation not found. Start a new design instead.")
+        size_presets = request.size_presets
+        if not size_presets or len(size_presets) == 0:
+            raise HTTPException(status_code=400, detail="At least one size preset must be specified for the edit.")
+        parent_generation_html = parent_generation['generated_html']
+        edit_prompt = request.edit_prompt
+        # check if the size presets are present in parent generation images_json
+        parent_images_json = parent_generation.get('images_json', [])
+        parent_presets = {img['size_preset'] for img in parent_images_json if 'size_preset' in img}
+        for preset in size_presets:
+            if preset not in parent_presets:
+                raise HTTPException(status_code=400, detail=f"Size preset '{preset}' not found in the original generation.")
+        full_edit_prompt = create_refine_prompt(parent_generation_html, edit_prompt, size_presets)
+        model_to_use = PRO_GEMINI_MODEL
 
+        modified_html_content = await generate_html_with_gemini(model_to_use, full_edit_prompt, client_ip)
+        cleaned_modified_html = clean_html_response(modified_html_content)
+
+        output_images = await get_multiple_images_from_html(cleaned_modified_html, size_presets)
+        
+        storage_client = auth_middleware.supabase.storage.from_("generations")
+        upload_tasks = [upload_image(img, current_user['id'], storage_client) for img in output_images]
+        results = await asyncio.gather(*upload_tasks)
+        outputs_for_db = [res for res in results if res is not None]
+        if not outputs_for_db:
+            logger.error(f"Failed to upload refined images for user {current_user['id']}.")
+            raise HTTPException(
+                status_code=500,
+                detail="We are unable to process your request at this time. Please try again later."
+            )
+        # add existing images from parent generation that are not in the current edit
+        for img in parent_images_json:
+            if img['size_preset'] not in size_presets:
+                outputs_for_db.append(img)
+        generation_time = int((time.time() - start_time) * 1000)
+        image_url = outputs_for_db[0]["image_url"] if outputs_for_db else None
         generation_data = GenerationCreate(
             user_id=current_user["id"],
-            design_thread_id=uuid.uuid4(),  # New thread for a new generation
-            parent_id=None,                 # No parent for a new generation
-            prompt=request.prompt,
-            prompt_type='creation',
-            generated_html=cleaned_html,
-            image_url=image_url,
+            design_thread_id=parent_generation['design_thread_id'],
+            parent_id=parent_generation['id'],
+            prompt=edit_prompt,
+            prompt_type='refine',
+            generated_html=cleaned_modified_html,
             model_used=model_to_use,
-            theme=request.theme,
-            size_preset=request.size_preset or DEFAULT_PRESET,
-            generation_time_ms=generation_time
+            theme=parent_generation['theme'],
+            size_preset=None,  # Not applicable for refine
+            generation_time_ms=generation_time,
+            images_json=outputs_for_db,
+            image_url=image_url
         )
-
         new_generation_record = await generation_service.create_generation(generation_data)
         if not new_generation_record:
-            raise HTTPException(status_code=500, detail="Failed to save generation record.")
-
-        logger.info(f"[{request_id}] Generation saved with ID: {new_generation_record['id']}")
-        # await user_service.increment_usage(current_user["id"])
-        # pro_usage_increment = 1 if is_pro_request else 0
-        # await user_service.update_usage(user_profile, usage_increment=1, pro_increment=pro_usage_increment)
-
-        # --- 6. NEW: Return the Full Generation Object as JSON ---
+            raise HTTPException(status_code=500, detail="Failed to save refined generation record.")
+        logger.info(f"Refinement saved with ID: {new_generation_record['id']}")
         pydantic_record = GenerationResponse.from_orm(new_generation_record)
         response_content = jsonable_encoder(pydantic_record)
         return JSONResponse(
@@ -861,17 +943,9 @@ async def generate_image_authenticated( # Renamed for clarity
             content=response_content
         )
 
-    except HTTPException as e:
-        logger.error(f"[{request_id}] HTTP error: {e.status_code} - {e.detail}")
-        raise
     except Exception as e:
-        logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Unexpected error during image generation. Try again later."
-        )
-
-
+        logger.error(f"Error in refine_design: {str(e)}")
+        raise HTTPException(status_code=500, detail="An error occurred during design refinement.")
 
 @app.post("/users/history/{generation_id}/edit", response_model=GenerationResponse)
 async def edit_generation(
@@ -890,7 +964,6 @@ async def edit_generation(
 
     auth_middleware = get_auth_middleware()
     generation_service = GenerationService(auth_middleware.supabase)
-    user_service = UserService(get_auth_middleware().supabase)
 
     try:
 
@@ -938,13 +1011,7 @@ async def edit_generation(
         )
 
         # 5. Upload the new image to Storage
-        file_path = f"{current_user['id']}/{uuid.uuid4()}.png"
-        auth_middleware.supabase.storage.from_("generations").upload(
-            file=modified_image_bytes,
-            path=file_path,
-            file_options={"content-type": "image/png"}
-        )
-        new_image_url = auth_middleware.supabase.storage.from_("generations").get_public_url(file_path)
+        new_image_url = upload_and_get_url(current_user, auth_middleware, modified_image_bytes)
 
         # 6. Save a NEW entry to the generations table
         generation_time = int((time.time() - start_time) * 1000)
@@ -987,131 +1054,20 @@ async def edit_generation(
         logger.error(f"[{request_id}] Unexpected error during edit: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="An unexpected error occurred during the edit.")
 
+@retry_on_ssLError
+def upload_and_get_url(current_user, auth_middleware, modified_image_bytes):
+    file_path = f"{current_user['id']}/{uuid.uuid4()}.png"
+    auth_middleware.supabase.storage.from_("generations").upload(
+            file=modified_image_bytes,
+            path=file_path,
+            file_options={"content-type": "image/png"}
+        )
+    new_image_url = auth_middleware.supabase.storage.from_("generations").get_public_url(file_path)
+    return new_image_url
+
 
 # ==================== EXISTING PREMIUM ENDPOINTS (UNCHANGED) ====================
 
-# @app.post("/api/generate-premium")
-# async def generate_image(
-#     request: GenerationRequest,
-#     http_request: Request,
-#     current_user: dict = Depends(get_current_user),
-#     _: dict = Depends(check_usage_limits),
-#     __: None = Depends(check_rate_limit),
-#     format: str = "png",
-#     quality: int = 95
-# ):
-#     """
-#     Generate a visual asset with premium features support
-#     """
-#     client_ip = http_request.client.host
-#     request_id = f"{current_user['id']}_{int(time.time())}"
-    
-#     logger.info(f"[{request_id}] Generation request from user: {current_user['email']}")
-    
-#     start_time = time.time()
-    
-#     try:
-#         # Initialize services
-#         auth_middleware = get_auth_middleware()
-#         user_service = UserService(auth_middleware.supabase)
-#         generation_service = GenerationService(auth_middleware.supabase)
-#         premium_service = PremiumService(auth_middleware.supabase)
-#         export_service = ExportService()
-        
-#         # Get user tier
-#         user_tier = current_user.get("subscription_tier", "free")
-        
-#         # Check premium feature restrictions
-#         if not premium_service.can_use_dimensions(user_tier, request.width, request.height):
-#             tier_features = premium_service.get_tier_features(user_tier)
-#             raise HTTPException(
-#                 status_code=status.HTTP_403_FORBIDDEN,
-#                 detail=f"Dimensions {request.width}x{request.height} exceed your plan limit ({tier_features['max_width']}x{tier_features['max_height']})"
-#             )
-        
-#         if not premium_service.can_use_model(user_tier, request.model or GEMINI_MODEL):
-#             raise HTTPException(
-#                 status_code=status.HTTP_403_FORBIDDEN,
-#                 detail=f"Model {request.model} not available in your plan"
-#             )
-        
-#         if not premium_service.can_export_format(user_tier, format):
-#             raise HTTPException(
-#                 status_code=status.HTTP_403_FORBIDDEN,
-#                 detail=f"Export format {format} not available in your plan"
-#             )
-        
-#         # Check usage limits
-#         usage_check = await user_service.check_usage_limits(current_user["id"])
-#         if not usage_check["allowed"]:
-#             raise HTTPException(
-#                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-#                 detail=usage_check["reason"]
-#             )
-        
-#         # Get queue priority for premium users
-#         priority = await premium_service.get_generation_queue_priority(current_user["id"])
-        
-#         # Get appropriate model for this request
-#         model = get_model_for_request(request)
-        
-#         # Generate the visual asset
-#         image_bytes = await generate_visual_asset(request, model, client_ip)
-        
-#         # Convert to requested format if not PNG
-#         if format.lower() != "png":
-#             image_bytes = await export_service.convert_image(image_bytes, format, quality)
-        
-#         # Calculate generation time
-#         generation_time = int((time.time() - start_time) * 1000)
-        
-#         # Create generation record
-#         generation_data = GenerationCreate(
-#             user_id=current_user["id"],
-#             prompt=request.prompt,
-#             model_used=request.model or GEMINI_MODEL,
-#             width=request.width,
-#             height=request.height,
-#             generation_time_ms=generation_time
-#         )
-        
-#         # Save to database
-#         generation_record = await generation_service.create_generation(generation_data)
-        
-#         # Update user usage count
-#         await user_service.increment_usage(current_user["id"])
-        
-#         logger.info(f"[{request_id}] Generation completed successfully with format: {format}")
-        
-#         # Return the image with enhanced headers
-#         content_type = export_service.get_content_type(format)
-#         file_extension = export_service.get_file_extension(format)
-        
-#         return StreamingResponse(
-#             io.BytesIO(image_bytes),
-#             media_type=content_type,
-#             headers={
-#                 "Content-Disposition": f"inline; filename=generated-image{file_extension}",
-#                 "Cache-Control": "no-cache",
-#                 "X-Request-ID": request_id,
-#                 "X-Generation-Time": str(generation_time),
-#                 "X-Generation-ID": generation_record["id"] if generation_record else "unknown",
-#                 "X-User-Tier": user_tier,
-#                 "X-Queue-Priority": str(priority),
-#                 # "X-Design-Template": prompt_template['name'] // todo fix this. commenting out for now
-#             }
-#         )
-        
-#     except HTTPException as e:
-#         logger.error(f"[{request_id}] HTTP error: {e.status_code} - {e.detail}")
-#         raise
-#     except Exception as e:
-#         logger.error(f"[{request_id}] Unexpected error: {str(e)}")
-#         raise HTTPException(
-#             status_code=500,
-#             detail=f"Unexpected error during image generation: {str(e)}"
-#         )
-  
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
@@ -1168,77 +1124,6 @@ async def get_user_analytics(current_user: dict = Depends(get_current_user)):
             status_code=500,
             detail="Failed to get user analytics"
         )
-
-# Add new premium features endpoints
-@app.post("/api/batch-generate")
-async def batch_generate(
-    requests: List[GenerationRequest],
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Batch generate multiple images (premium feature)
-    """
-    try:
-        auth_middleware = get_auth_middleware()
-        premium_service = PremiumService(auth_middleware.supabase)
-        
-        # Check if user can perform batch generation
-        batch_check = await premium_service.can_generate_batch(current_user["id"], len(requests))
-        if not batch_check["allowed"]:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=batch_check["reason"]
-            )
-        
-        # Process batch requests
-        results = []
-        for i, request in enumerate(requests):
-            try:
-                # Generate individual image
-                result = await generate_image(request, current_user)
-                results.append({"index": i, "status": "success", "result": result})
-            except Exception as e:
-                results.append({"index": i, "status": "error", "error": str(e)})
-        
-        return {"batch_results": results}
-        
-    except Exception as e:
-        logger.error(f"Batch generation error: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Batch generation failed"
-        )
-
-@app.get("/premium/features")
-async def get_premium_features(current_user: dict = Depends(get_current_user)):
-    """
-    Get available premium features for current user
-    """
-    try:
-        auth_middleware = get_auth_middleware()
-        premium_service = PremiumService(auth_middleware.supabase)
-        
-        user_tier = current_user.get("subscription_tier", "free")
-        features = premium_service.get_tier_features(user_tier)
-        
-        return {
-            "tier": user_tier,
-            "features": features,
-            "limits": {
-                "max_dimensions": f"{features['max_width']}x{features['max_height']}",
-                "available_models": features["available_models"],
-                "export_formats": features["export_formats"],
-                "generation_history_days": features["generation_history_days"]
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting premium features: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to get premium features"
-        )
-
 
 @app.post("/premium/templates")
 async def create_custom_template(
