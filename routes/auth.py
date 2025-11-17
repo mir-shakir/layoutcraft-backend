@@ -59,7 +59,7 @@ async def register(request: RegisterRequest):
     Register a new user with timeout handling
     """
     auth_middleware = get_auth_middleware()
-    
+    logger.info(f"Attempting to register user with email: {request.email}")    
     try:
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:8080")
         # Validate inputs
@@ -75,7 +75,8 @@ async def register(request: RegisterRequest):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=message
             )
-        
+        logger.info(f"Input validation passed for email: {request.email}")
+
         # Register user with Supabase with timeout
         try:
             auth_response = await asyncio.wait_for(
@@ -115,13 +116,21 @@ async def register(request: RegisterRequest):
         #         user_id=auth_response.user.id,
         #         email_confirmation_required=True
         #     )
-        
+
+        logger.info(f"User registered successfully: {request.email}")
         # Create access token for confirmed users
         access_token = auth_middleware.create_access_token(
             auth_response.user.id,
             auth_response.user.email
         )
-        
+        # Set user to pro-trial and set trial_ends_at to 7 days from now
+        trial_ends_at = datetime.utcnow() + timedelta(days=7)
+        auth_middleware.supabase.table("user_profiles").update({
+            "subscription_tier": "pro-trial",
+            "trial_ends_at": trial_ends_at.isoformat()
+        }).eq("id", auth_response.user.id).execute()
+
+        logger.info(f"User profile created successfully: {request.email}")
         # Get user profile
         user_profile = await auth_middleware.get_user_profile(auth_response.user.id)
         
@@ -132,7 +141,6 @@ async def register(request: RegisterRequest):
             )
         
         logger.info(f"User registered and confirmed successfully: {request.email}")
-        
         return RegistrationSuccessResponse(
             access_token=access_token,
             user=UserResponse(**user_profile)

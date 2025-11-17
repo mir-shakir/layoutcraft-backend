@@ -165,10 +165,31 @@ def create_dynamic_prompt_context(preset_name: str) -> str:
     
     return context.strip()
     
+def get_multiple_presets_with_context(preset_names: List[str]) -> str:
+    """
+    Get a combined prompt context for multiple presets.
+    
+    Args:
+        preset_names: List of preset names to include in the context
+        
+    Returns:
+        Combined string context for all valid presets in the format:
+        {
+        - preset_name: width x height pixels
+        }
+    """
+    context_lines = []
+    
+    for preset_name in preset_names:
+        if validate_preset_name(preset_name):
+            preset = DIMENSION_PRESETS[preset_name]
+            context_lines.append(f"- {preset_name}: {preset['width']}x{preset['height']} pixels")
+    context = "\n".join(context_lines)
 
-    #     context = f"""
-    # The design should be optimized for {preset['purpose'].lower()}.
-    # Target dimensions: {width}x{height} pixels.
-    # Use a {layout_context} that works well for this format.
-    # Consider the viewing context and optimize text readability for this specific use case.
-    # """
+    if not context:
+        # If no valid presets, return default
+        default_preset = DIMENSION_PRESETS[DEFAULT_PRESET]
+        context_lines.append(f"- {DEFAULT_PRESET}: {default_preset['width']}x{default_preset['height']} pixels")
+
+    return context
+    
