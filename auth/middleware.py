@@ -9,6 +9,8 @@ import os
 from supabase import create_client, Client
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import logging
+logger = logging.getLogger(__name__)
 
 # Load environment variables first
 load_dotenv()
@@ -68,14 +70,37 @@ class AuthMiddleware:
                     detail="User profile not found"
                 )
             
+            user_profile_data = user_response.data
+
+            # Check if the user is on a trial and if it has expired
+            if user_profile_data.get("subscription_tier") == "pro-trial":
+                trial_end_date = user_profile_data.get("trial_ends_at")
+                if trial_end_date:
+                    # Parse the timestamp and make it timezone-aware (UTC)
+                    trial_end_datetime = datetime.fromisoformat(trial_end_date.replace("Z", "+00:00"))
+
+                    # If the trial has ended
+                    if datetime.now(trial_end_datetime.tzinfo) > trial_end_datetime:
+                        # Revert the user to the free tier in the database
+                        self.supabase.table("user_profiles").update({
+                            "subscription_tier": "free"
+                        }).eq("id", user_id).execute()
+
+                        # IMPORTANT: Update the local data for the current request
+                        user_profile_data["subscription_tier"] = "free"
+                        logger.info(f"User {user_id}'s trial has expired. Reverted to free tier.")
+
             return {
-                "id": user_response.data["id"],
-                "email": user_response.data["email"],
-                "subscription_tier": user_response.data["subscription_tier"],
-                "usage_count": user_response.data["usage_count"],
-                "usage_reset_date": user_response.data["usage_reset_date"],
-                "pro_usage_count": user_response.data.get("pro_usage_count", 0),
-                "edit_usage_count": user_response.data.get("edit_usage_count", 0)
+                "id": user_profile_data["id"],
+                "email": user_profile_data["email"],
+                "subscription_tier": user_profile_data["subscription_tier"],
+                "usage_count": user_profile_data["usage_count"],
+                "usage_reset_date": user_profile_data["usage_reset_date"],
+                "pro_usage_count": user_profile_data.get("pro_usage_count", 0),
+                "edit_usage_count": user_profile_data.get("edit_usage_count", 0),
+                "full_name": user_profile_data.get("full_name", ""),
+                "dodo_customer_id": user_profile_data.get("dodo_customer_id", ""),
+                "trial_ends_at": user_profile_data.get("trial_ends_at")
             }
             
         except jwt.ExpiredSignatureError:
@@ -92,11 +117,6 @@ class AuthMiddleware:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token signature"
-            )
-        except jwt.JWTError as e:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Invalid token: {str(e)}"
             )
         except Exception as e:
             raise HTTPException(

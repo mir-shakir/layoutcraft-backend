@@ -64,6 +64,18 @@ async def check_usage_limits(user: dict = Depends(get_current_user)) -> dict:
         )
     
     return user
+def require_pro_plan(current_user: dict = Depends(get_current_user)):
+    """
+    Dependency that raises an exception if the user does not have an active
+    pro plan or trial.
+    """
+    tier = current_user.get("subscription_tier")
+    if tier not in ["pro", "pro-trial"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This feature requires a Pro plan. Please upgrade to continue."
+        )
+    return current_user
 
 # Convenience dependencies
 RequireProTier = require_subscription_tier(SubscriptionTier.PRO)

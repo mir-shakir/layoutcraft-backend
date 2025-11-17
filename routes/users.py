@@ -6,7 +6,7 @@ from typing import List, Optional
 import logging
 from datetime import datetime, timedelta
 
-from auth.dependencies import get_current_user, RequireProTier
+from auth.dependencies import get_current_user, require_pro_plan
 from auth.middleware import auth_middleware
 from models.user import UserResponse
 from models.generation import GenerationResponse , HistoryParent, HistoryParentsResponse ,EditGroupsResponse ,EditGroup
@@ -337,7 +337,7 @@ async def update_user_preferences(
 @router.get("/history/design", response_model=GenerationResponse)
 async def get_single_generation(
     generation_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_pro_plan),
     auth_middleware: AuthMiddleware = Depends(get_auth_middleware)
 ):
     """

@@ -9,6 +9,7 @@ from enum import Enum
 class SubscriptionTier(str, Enum):
     FREE = "free"
     PRO = "pro"
+    PRO_TRIAL = "pro-trial" # <-- ADD THIS LINE
     ENTERPRISE = "enterprise"
 
 class UserProfile(BaseModel):
@@ -21,6 +22,7 @@ class UserProfile(BaseModel):
     usage_reset_date: datetime
     created_at: datetime
     updated_at: datetime
+    trial_ends_at: Optional[datetime] = None
 
 class UserCreate(BaseModel):
     email: EmailStr
@@ -37,6 +39,7 @@ class UserResponse(BaseModel):
     full_name: Optional[str] = None
     avatar_url: Optional[str] = None
     subscription_tier: SubscriptionTier
+    trial_ends_at: Optional[datetime] = None
     usage_count: int
     usage_reset_date: datetime
     created_at: datetime

@@ -30,10 +30,11 @@ import io
 from routes.auth import router as auth_router
 from routes.users import router as users_router
 from routes.paddle import router as paddle_router
+from routes.dodo import router as dodo_router
 # from routes.billing import router as billing_router
 # from routes.advanced_generation import router as advanced_router
 
-from auth.dependencies import get_current_user, check_usage_limits
+from auth.dependencies import require_pro_plan, get_current_user, check_usage_limits
 from auth.middleware import get_auth_middleware
 from models.generation import GenerationCreate, GenerationResponse
 
@@ -87,6 +88,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(paddle_router)
+app.include_router(dodo_router)
 # app.include_router(billing_router)
 # app.include_router(advanced_router)
 
@@ -764,7 +766,13 @@ async def generate_image_authenticated( # Renamed for clarity
         user_profile = current_user
         if not user_profile:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User profile not found.")
-
+        
+        if user_profile.get("subscription_tier") not in ["pro", "pro-trial"]:
+            if len(request.size_presets) > 1:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Multi-dimension generation is a Pro feature. Please upgrade to continue."
+                )
         model_to_use = PRO_GEMINI_MODEL 
 
         full_prompt = create_full_generation_prompt(request.prompt,request.size_presets,request.theme)
@@ -867,7 +875,7 @@ async def submit_feedback(data: FeedbackData, _: None = Depends(check_mvp_rate_l
 async def refine_design(
     request: RefineDesignRequest,
     http_request: Request,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_pro_plan),
     _: None = Depends(check_mvp_rate_limit)
 ):
     # Implementation for refining the design goes here
