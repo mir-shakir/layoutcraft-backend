@@ -29,7 +29,7 @@ class DodoService:
 
         self.async_client = AsyncDodoPayments(
             bearer_token=self.dodo_api_key,
-            environment="test_mode"
+            environment="live_mode"
         )
 
     async def create_checkout_session(self, user_id: str, user_email: str, full_name: str, dodo_customer_id: str, trial_period_days: int) -> str:
@@ -51,8 +51,8 @@ class DodoService:
             checkout_session = await self.async_client.checkout_sessions.create(
                 customer=customer_payload,
                 product_cart=[{"product_id": self.pro_plan_id, "quantity": 1}],
-                # return_url=f"{self.frontend_url}/dashboard?dodo_checkout=success",
-                return_url="http://0.0.0.0:8080/account?payment=success",
+                return_url=f"{self.frontend_url}/account?payment=success",
+                # return_url="http://0.0.0.0:8080/account?payment=success",
                 metadata={"user_id": user_id},
                 subscription_data=subscription_data
             )
