@@ -2,7 +2,7 @@
 User model for LayoutCraft
 """
 from pydantic import BaseModel, EmailStr,Field
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 from enum import Enum
 
@@ -11,6 +11,12 @@ class SubscriptionTier(str, Enum):
     PRO = "pro"
     PRO_TRIAL = "pro-trial" # <-- ADD THIS LINE
     ENTERPRISE = "enterprise"
+
+class BrandKit(BaseModel):
+    colors: Dict[str, str] = {} # e.g. {"primary": "#000000", "secondary": "#ffffff"}
+    fonts: Dict[str, str] = {}  # e.g. {"heading": "Inter", "body": "Roboto"}
+    guidelines: str = ""
+
 
 class UserProfile(BaseModel):
     id: str

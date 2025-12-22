@@ -11,6 +11,7 @@ COMMON_INSTRUCTIONS = """
 - Google Fonts imports in head as needed
 - You MUST write standard, browser-compatible CSS
 Strict Requirements: "{preset_context}"
+Brand Guidelines: "{brand_kit_context}"
 
 **REQUIREMENTS:**
 - STRICTLY follow ALL user specifications (colors, style, layout, text preferences)
