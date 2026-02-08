@@ -245,16 +245,14 @@ def get_next_prompt_template() -> dict:
     return template
 def get_design_prompt_template(theme: str) -> dict:
     """Get a design prompt template based on the specified theme."""
-    if theme == "auto":
-        return random.choice(DESIGN_PROMPTS)
-    # Get theme using name
+    # Get theme using name (works for "auto" and all named themes)
     for template in DESIGN_PROMPTS:
         if template["name"].lower() == theme.lower():
             logger.debug(f"Selected design prompt for theme '{theme}': {template['name']}")
             return template
-    # If no match found, return a default or raise an error
-    logger.warning(f"No design prompt found for theme '{theme}', using default")
-    return get_next_prompt_template()  # Fallback to random template if not found
+    # If no match found, fallback to auto template
+    logger.warning(f"No design prompt found for theme '{theme}', using auto")
+    return DESIGN_PROMPTS[0]  # auto template is first in list
 
 def create_refine_prompt(original_html: str, edit_prompt: str, size_preset_context: str) -> str:
     """Create the full edit prompt for refining existing HTML."""

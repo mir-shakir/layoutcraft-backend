@@ -27,6 +27,17 @@ Brand Guidelines: "{brand_kit_context}"
 
 DESIGN_PROMPTS = [
     {
+        "name": "auto",
+        "description": "Adaptive style that lets the LLM choose the best aesthetic based on user intent",
+        "prompt": f"""{COMMON_INSTRUCTIONS}
+
+**ADAPTIVE DESIGN:**
+Analyze the user's request and choose the most fitting visual style, color palette, and layout approach based on their content, industry, and intent. Use your best judgment for typography, spacing, color harmony, and visual hierarchy. Prioritize clarity, readability, and professional quality. There are no strict style constraints — deliver the design that best serves the user's goal.
+
+**User Request:** "{{user_prompt}}"
+"""
+    },
+    {
         "name": "glassmorphism_premium",
         "description": "Modern glassmorphism with depth and sophistication",
         "prompt": f"""{COMMON_INSTRUCTIONS}
