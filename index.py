@@ -143,6 +143,7 @@ class GenerateMultipleRequest(BaseModel):
     prompt: str = Field(..., description="User's prompt for image generation")
     theme:str = Field(default="auto", description="Theme for the image generation (MVP)")
     size_presets : List[str] = Field(default=["blog_header"], description="List of predefined size presets")
+    use_brand_kit: bool = Field(default=False, description="Whether to apply brand kit guidelines")
 
 class RefineDesignRequest(BaseModel):
     generation_id: str = Field(..., description="ID of the generation to refine")
@@ -263,14 +264,14 @@ def create_refine_prompt(original_html: str, edit_prompt: str, size_preset_conte
         size_preset_context=size_preset_context
     )
     return full_prompt
-def create_full_generation_prompt(user_prompt: str, size_presets: List[str], theme: str) -> str:
+def create_full_generation_prompt(user_prompt: str, size_presets: List[str], theme: str, brand_kit_context: str = "") -> str:
     """
         This function is an adaptation of create_generation_prompt_with_template to do all the promt building in one place.
         include multiple size presets in the prmpt with dimet
     """
     full_preset_prompt = SIZE_PRESET_CONTEXT + get_multiple_presets_with_context(size_presets)
     prompt_template = get_design_prompt_template(theme)
-    full_prompt = prompt_template["prompt"].format(user_prompt=user_prompt,preset_context=full_preset_prompt)
+    full_prompt = prompt_template["prompt"].format(user_prompt=user_prompt,preset_context=full_preset_prompt, brand_kit_context=brand_kit_context)
     return full_prompt
         
 
@@ -742,6 +743,73 @@ async def generate_image_anonymous(
         )
 
 
+def get_brand_kit_context_if_requested(request: GenerateMultipleRequest, current_user: dict, request_id: str) -> str:
+    """
+    Helper to get brand kit variables string if requested by the user.
+    Returns the brand context string or empty string.
+    """
+    if request.use_brand_kit:
+        try:
+            auth_middleware = get_auth_middleware()
+            bk_response = auth_middleware.supabase.table("brand_kits").select("*").eq("user_id", current_user["id"]).single().execute()
+            
+            if bk_response.data:
+                bk = bk_response.data
+                colors = bk.get('colors', {})
+                fonts = bk.get('fonts', {})
+                guidelines = bk.get('guidelines', '')
+
+                # 1. Build Colors Section
+                color_context = []
+                # Map of UI label to key
+                color_fields = [
+                    ("Primary", "primary"),
+                    ("Secondary", "secondary"),
+                    ("Accent", "accent")
+                ]
+                for label, key in color_fields:
+                    value = colors.get(key)
+                    if value:
+                        color_context.append(f"{label}: {value}")
+                
+                color_str = f"- Colors: {', '.join(color_context)}" if color_context else ""
+
+                # 2. Build Typography Section
+                font_context = []
+                font_fields = [
+                    ("Heading", "heading"),
+                    ("Subheading", "subheading"), 
+                    ("Title", "title"),
+                    ("Subtitle", "subtitle"),
+                    ("Body", "body"),
+                    ("Quote", "quote"),
+                    ("Caption", "caption")
+                ]
+                for label, key in font_fields:
+                    value = fonts.get(key)
+                    if value:
+                        font_context.append(f"{label}: '{value}'")
+
+                font_str = f"- Fonts: {', '.join(font_context)}" if font_context else ""
+
+                # 3. Build Guidelines Section
+                guidelines_str = f"- Vibe/Rules: {guidelines}" if guidelines else ""
+
+                # Combine all parts
+                parts = [p for p in [color_str, font_str, guidelines_str] if p]
+                
+                if parts:
+                     brand_context = "STRICTLY ADHERE TO BRAND GUIDELINES:\n" + "\n".join(parts) + "\n"
+                     logger.info(f"[{request_id}] Retrieved Brand Kit context")
+                     return brand_context
+
+        except Exception as e:
+            logger.warning(f"[{request_id}] Failed to fetch brand kit despite flag being True: {e}")
+            # Continue without failing the generation, just log the warning
+    
+    return ""
+
+
 #  =======================New Authenticated Endpoints ============================
 
 
@@ -775,7 +843,10 @@ async def generate_image_authenticated( # Renamed for clarity
                 )
         model_to_use = PRO_GEMINI_MODEL 
 
-        full_prompt = create_full_generation_prompt(request.prompt,request.size_presets,request.theme)
+        # 1. Handle Brand Kit Injection
+        brand_kit_context = get_brand_kit_context_if_requested(request, current_user, request_id) 
+
+        full_prompt = create_full_generation_prompt(request.prompt, request.size_presets, request.theme, brand_kit_context)
         logger.info(f"full prommpt : {full_prompt}")
         html_content = await generate_html_with_gemini(model_to_use, full_prompt, client_ip)
         cleaned_html = clean_html_response(html_content)
@@ -803,7 +874,8 @@ async def generate_image_authenticated( # Renamed for clarity
             theme=request.theme,
             generation_time_ms=generation_time,
             images_json=outputs_for_db,
-            image_url=image_url
+            image_url=image_url,
+            used_brand_kit=request.use_brand_kit
         )
 
         new_generation_record = await generation_service.create_generation(generation_data)

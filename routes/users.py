@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 from auth.dependencies import get_current_user, require_pro_plan
 from auth.middleware import auth_middleware
-from models.user import UserResponse
+from models.user import UserResponse, BrandKit
 from models.generation import GenerationResponse , HistoryParent, HistoryParentsResponse ,EditGroupsResponse ,EditGroup
 from auth.middleware import get_auth_middleware, AuthMiddleware
 from fastapi.responses import JSONResponse
@@ -107,6 +107,54 @@ async def get_usage_stats(current_user: dict = Depends(get_current_user)):
             detail="Failed to get usage statistics"
         )
 
+@router.get("/brand-kit", response_model=BrandKit)
+async def get_brand_kit(current_user: dict = Depends(get_current_user)):
+    """
+    Fetch the user's brand kit. Returns 404 if not set (frontend handles empty state).
+    """
+    try:
+        auth_middleware = get_auth_middleware()
+        response = auth_middleware.supabase.table("brand_kits").select("*").eq("user_id", current_user["id"]).single().execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Brand kit not found")
+        return response.data
+    except Exception as e:
+        # Supabase .single() raises an error if no rows found, usually caught here
+        raise HTTPException(status_code=404, detail="Brand kit not found")
+
+@router.post("/brand-kit", response_model=BrandKit)
+async def save_brand_kit(
+    kit_data: BrandKit, 
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Upsert (Create or Update) the user's brand kit.
+    """
+    try:
+        # Check if user is on pro plan
+        if current_user.get("subscription_tier") not in ["pro", "pro-trial"]:
+             raise HTTPException(status_code=403, detail="Brand Kit is a Pro feature. Please upgrade to use it.")
+
+        data = kit_data.dict()
+        data["user_id"] = current_user["id"]
+        data["updated_at"] = datetime.now().isoformat()
+        
+        auth_middleware = get_auth_middleware()
+
+        # upsert=True is default behavior for single row inserts with PK conflict in some libs, 
+        # but for Supabase-py we use .upsert() explicitly.
+        response = auth_middleware.supabase.table("brand_kits").upsert(data).execute()
+        
+        if not response.data:
+             raise HTTPException(status_code=500, detail="Failed to save brand kit")
+             
+        return response.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving brand kit: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 @router.get("/history/parents" ,response_model=HistoryParentsResponse)
 async def get_generation_parents(
     current_user: dict = Depends(get_current_user),
@@ -128,6 +176,7 @@ async def get_generation_parents(
                 "original_prompt": item["prompt"],
                 "created_at": item["created_at"],
                 "thumbnail_url": item["image_url"],
+                "used_brand_kit": item.get("used_brand_kit", False)
             })
             parents.append(parent)
 
@@ -416,7 +465,7 @@ def get_variations_count_aggregated(auth_middleware, design_thread_ids):
 @retry_on_ssLError
 def get_user_parent_generations(current_user, auth_middleware, limit, offset):
     response = auth_middleware.supabase.table("generations").select(
-            "id, prompt, image_url, created_at, design_thread_id"
+            "id, prompt, image_url, created_at, design_thread_id, used_brand_kit"
         ).eq("user_id", current_user["id"]).is_("parent_id", None).order(
             "created_at", desc=True
         ).limit(limit).offset(offset).execute()

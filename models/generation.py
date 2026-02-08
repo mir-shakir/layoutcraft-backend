@@ -26,6 +26,7 @@ class GenerationCreate(BaseModel):
     size_preset: Optional[str] = None
     generation_time_ms: Optional[int] = None 
     images_json: Optional[List[GenerationOutput]] = None
+    used_brand_kit: bool = False
     
 
 class GenerationResponse(BaseModel):
@@ -44,6 +45,7 @@ class GenerationResponse(BaseModel):
     size_preset: Optional[str] = None
     created_at: datetime
     images_json: Optional[List[GenerationOutput]] = None # Updated to list of GenerationOutput
+    used_brand_kit: bool = False
 
     class Config:
         from_attributes = True # Use this to allow the model to be created from ORM objects
@@ -58,6 +60,7 @@ class HistoryParent(BaseModel):
     thumbnail_url: Optional[str] = None
     edit_groups_count: Optional[int] = None
     total_designs_count: Optional[int] = None
+    used_brand_kit: bool = False
 
     class Config:
         from_attributes = True
