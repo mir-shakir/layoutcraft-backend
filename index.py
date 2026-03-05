@@ -31,6 +31,7 @@ from routes.auth import router as auth_router
 from routes.users import router as users_router
 from routes.paddle import router as paddle_router
 from routes.dodo import router as dodo_router
+from routes.resume import router as resume_router
 # from routes.billing import router as billing_router
 # from routes.advanced_generation import router as advanced_router
 
@@ -89,6 +90,7 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(paddle_router)
 app.include_router(dodo_router)
+app.include_router(resume_router)
 # app.include_router(billing_router)
 # app.include_router(advanced_router)
 
