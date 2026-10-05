@@ -67,11 +67,50 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+from contextlib import asynccontextmanager
+
+# Initialize Gemini model at startup
+gemini_model = None
+pro_gemini_model = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize the MCP Server's Streamable HTTP transport tasks and session manager correctly
+
+    # Create the task group to run the MCP server's tasks
+    try:
+        from mcp_server.server import mcp_server
+    except Exception as e:
+        logger.error(f"Error importing mcp_server: {e}")
+
+    # Startup
+    global gemini_model
+    global pro_gemini_model
+    try:
+        gemini_client = genai.Client(http_options=HttpOptions(api_version="v1"))
+        gemini_model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        pro_gemini_model_name = os.getenv("PRO_GEMINI_MODEL", "gemini-2.5-pro")
+        logger.info("✅ LayoutCraft Backend started successfully")
+        logger.info(f"✅ Default model: {gemini_model_name}")
+        logger.info(f"✅ Pro model: {pro_gemini_model_name}")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize LayoutCraft Backend: {e}")
+        # Proceed even if Gemini key is not valid, layoutcraft will just partially fail.
+        # This prevents the server from crashing locally.
+
+    # Yield control back to FastAPI
+    yield
+
+    # Shutdown
+    logger.info("🛑 LayoutCraft Backend shutting down")
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="LayoutCraft Backend",
     description="AI-powered visual asset generator using LLM -> HTML -> Image workflow",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Add CORS middleware
@@ -91,6 +130,11 @@ app.include_router(paddle_router)
 app.include_router(dodo_router)
 # app.include_router(billing_router)
 # app.include_router(advanced_router)
+
+# Mount the MCP server's SSE app
+from mcp_server.server import mcp_server
+mcp_starlette_app = mcp_server.sse_app(sse_path="/sse", message_path="/messages/")
+app.mount("/mcp", mcp_starlette_app)
 
 
 # Configuration constants
@@ -610,36 +654,29 @@ def upload_image_and_get_url(current_user_id, storage_client, image_bytes, prese
     return image_url
 
 
-# Initialize Gemini model at startup
-gemini_model = None
-pro_gemini_model = None
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services on startup."""
-    global gemini_model
-    global pro_gemini_model
-    try:
-        gemini_client = genai.Client(http_options=HttpOptions(api_version="v1"))
-        gemini_model_name = GEMINI_MODEL
-        pro_gemini_model_name = PRO_GEMINI_MODEL
-        logger.info("✅ LayoutCraft Backend started successfully")
-        logger.info("✅ LayoutCraft Backend started successfully")
-        logger.info(f"✅ Default model: {gemini_model_name}")
-        logger.info(f"✅ Pro model: {pro_gemini_model_name}")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize LayoutCraft Backend: {e}")
-        raise
-
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     logger.debug("Health check requested")
+
+    # Check FFmpeg availability
+    import subprocess
+    ffmpeg_available = False
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True)
+        ffmpeg_available = result.returncode == 0
+    except Exception:
+        pass
+
     return {
         "status": "healthy", 
         "timestamp": datetime.now().isoformat(),
         "model": GEMINI_MODEL,
-        "available_models": list(AVAILABLE_MODELS.keys())
+        "available_models": list(AVAILABLE_MODELS.keys()),
+        "mcp_video_subsystem": {
+            "ffmpeg_available": ffmpeg_available,
+            "mcp_mounted": True
+        }
     }
 
 @app.get("/api/presets")

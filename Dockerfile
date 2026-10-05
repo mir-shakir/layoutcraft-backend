@@ -26,7 +26,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # First, update the package lists to ensure we can find all dependencies.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-    gnupg \
+    gnupg ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get update \
     && playwright install-deps \
