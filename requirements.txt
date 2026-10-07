@@ -17,3 +17,5 @@ httpx
 paddle-python-sdk
 dodopayments
 standardwebhooks
+mcp
+ffmpeg-python
