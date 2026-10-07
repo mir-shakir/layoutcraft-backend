@@ -141,7 +141,16 @@ from mcp_server.server import mcp_server
 # NOTE: Using streamable_http_path="/" causes it to intercept all requests under /mcp/ including trailing slashes?
 # Actually, FastApi / Starlette routing logic with `app.mount` handles this properly, but let's make sure
 # the endpoint actually resolves properly without redirect loops or 500s.
-mcp_starlette_app = mcp_server.streamable_http_app(streamable_http_path="/")
+mcp_starlette_app = mcp_server.streamable_http_app(
+    streamable_http_path="/",
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=[
+            "layoutcraft-backend.onrender.com",
+            "layoutcraft-backend.onrender.com:*",
+        ]
+    )
+)
+
 app.mount("/mcp", mcp_starlette_app)
 
 
