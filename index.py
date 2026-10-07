@@ -98,8 +98,13 @@ async def lifespan(app: FastAPI):
         # Proceed even if Gemini key is not valid, layoutcraft will just partially fail.
         # This prevents the server from crashing locally.
 
-    # Yield control back to FastAPI
-    yield
+    # Fast API's lifespan context must also run the MCP server's lifespan context
+    # since `streamable_http_app` returns a Starlette app with its own lifespan
+    # that starts the task groups. We need to manually run that lifespan.
+    # We mounted mcp_starlette_app, let's trigger its lifespan.
+    async with mcp_server._lowlevel_server.session_manager.run():
+        # Yield control back to FastAPI
+        yield
 
     # Shutdown
     logger.info("🛑 LayoutCraft Backend shutting down")
@@ -131,9 +136,12 @@ app.include_router(dodo_router)
 # app.include_router(billing_router)
 # app.include_router(advanced_router)
 
-# Mount the MCP server's SSE app
+# Mount the MCP server's Streamable HTTP app
 from mcp_server.server import mcp_server
-mcp_starlette_app = mcp_server.sse_app(sse_path="/sse", message_path="/messages/")
+# NOTE: Using streamable_http_path="/" causes it to intercept all requests under /mcp/ including trailing slashes?
+# Actually, FastApi / Starlette routing logic with `app.mount` handles this properly, but let's make sure
+# the endpoint actually resolves properly without redirect loops or 500s.
+mcp_starlette_app = mcp_server.streamable_http_app(streamable_http_path="/")
 app.mount("/mcp", mcp_starlette_app)
 
 
