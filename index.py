@@ -138,6 +138,8 @@ app.include_router(dodo_router)
 
 # Mount the MCP server's Streamable HTTP app
 from mcp_server.server import mcp_server
+from mcp.server.transport_security import TransportSecuritySettings
+
 # NOTE: Using streamable_http_path="/" causes it to intercept all requests under /mcp/ including trailing slashes?
 # Actually, FastApi / Starlette routing logic with `app.mount` handles this properly, but let's make sure
 # the endpoint actually resolves properly without redirect loops or 500s.
